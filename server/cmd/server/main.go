@@ -54,6 +54,9 @@ func main() {
 		log.Fatalf("Fatal: Database initialization failed: %v", err)
 	}
 	defer store.Close()
+	if err := store.MarkAllDevicesOffline(); err != nil {
+		log.Printf("[HttpSMS] Warning: could not reset device status: %v", err)
+	}
 
 	// Initialize Webhook Dispatcher
 	dispatcher := webhook.NewDispatcher(store)

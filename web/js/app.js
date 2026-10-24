@@ -13,6 +13,7 @@ class GatewayDashboard {
     this.selectedMessage = null;
     this.activeSearch = '';
     this.activeDirectionFilter = '';
+    this.pendingPairDeviceId = null;
   }
 
   init() {
@@ -22,6 +23,8 @@ class GatewayDashboard {
     this.bindComposer();
     this.bindWebSocket();
     this.loadInitialData();
+
+    window.addEventListener('auth:required', () => this.openSettingsModal(true));
 
     // Setup periodic polling fallback (every 30s)
     setInterval(() => this.refreshTelemetry(), 30000);
@@ -102,13 +105,17 @@ class GatewayDashboard {
         connStatus.textContent = isOnline ? 'Gateway Connected' : 'Disconnected';
       }
       if (latencyEl) {
-        latencyEl.textContent = isOnline ? `${latency}ms` : '--';
+        if (!isOnline) latencyEl.textContent = '--';
       }
     });
 
-    socket.on('_latency', (latency) => {
-      if (latencyEl) latencyEl.textContent = `${latency}ms`;
-    });
+    // Measure real HTTP round-trip time to the gateway server.
+    const measureLatency = async () => {
+      const latency = await api.measureLatency();
+      if (latencyEl) latencyEl.textContent = latency === null ? '--' : `${latency}ms`;
+    };
+    measureLatency();
+    setInterval(measureLatency, 10000);
 
     // Live Inbound SMS Event
     socket.on('sms.received', (msg) => {
@@ -126,12 +133,16 @@ class GatewayDashboard {
     socket.on('device.heartbeat', (device) => {
       this.updateDeviceInList(device);
       this.refreshTelemetry();
+      if (device && device.id === this.pendingPairDeviceId) this.markPairingConnected();
     });
 
     // Device Status Change
     socket.on('device.status', (data) => {
       this.loadDevices();
       this.refreshTelemetry();
+      if (data && data.status === 'online' && data.device_id === this.pendingPairDeviceId) {
+        this.markPairingConnected();
+      }
     });
   }
 
@@ -191,9 +202,11 @@ class GatewayDashboard {
       ? `<span class="status-badge" style="background:var(--accent-blue-subtle); color:var(--accent-blue);">OUT</span>`
       : `<span class="status-badge" style="background:var(--status-emerald-subtle); color:var(--status-emerald);">IN</span>`;
 
-    const statusBadge = `<span class="status-badge badge-${msg.status}" id="status-badge-${msg.id}">${msg.status.toUpperCase()}</span>`;
+    const status = msg.status || 'unknown';
+    const statusBadge = `<span class="status-badge badge-${status}" id="status-badge-${msg.id}">${status.toUpperCase()}</span>`;
     const party = isOutbound ? `To: ${msg.recipient}` : `From: ${msg.sender}`;
-    const truncatedBody = msg.body.length > 55 ? msg.body.substring(0, 55) + '...' : msg.body;
+    const body = msg.body || '';
+    const truncatedBody = body.length > 55 ? body.substring(0, 55) + '…' : body;
 
     tr.innerHTML = `
       <td class="mono text-muted" style="font-size:12px;">${timeStr}</td>
@@ -256,8 +269,7 @@ class GatewayDashboard {
 
     document.getElementById('btn-copy-json')?.addEventListener('click', () => {
       if (this.selectedMessage) {
-        navigator.clipboard.writeText(JSON.stringify(this.selectedMessage, null, 2));
-        this.showToast('Message JSON copied to clipboard', 'success');
+        this.copyText(JSON.stringify(this.selectedMessage, null, 2));
       }
     });
   }
@@ -355,7 +367,7 @@ class GatewayDashboard {
     this.devices.forEach(d => {
       const opt = document.createElement('option');
       opt.value = d.id;
-      opt.textContent = `${d.name} (${d.status.toUpperCase()}) - Batt: ${d.battery_level}%`;
+      opt.textContent = `${d.name} (${(d.status || 'offline').toUpperCase()}) - Batt: ${d.battery_level}%`;
       select.appendChild(opt);
     });
   }
@@ -366,7 +378,7 @@ class GatewayDashboard {
     if (!container) return;
 
     try {
-      this.devices = await api.listDevices();
+      this.devices = (await api.listDevices()) || [];
       if (this.devices.length === 0) {
         container.innerHTML = `
           <div style="grid-column: 1/-1; text-align: center; padding: 48px; background: var(--bg-surface); border: 1px dashed var(--border-subtle); border-radius: 8px;">
@@ -392,10 +404,11 @@ class GatewayDashboard {
     card.className = 'terminal-card';
     card.id = `device-card-${dev.id}`;
 
-    const isOnline = dev.status === 'online';
-    const statusBadge = `<span class="status-badge badge-${dev.status}">${dev.status.toUpperCase()}</span>`;
+    const status = dev.status || 'offline';
+    const isOnline = status === 'online';
+    const statusBadge = `<span class="status-badge badge-${status}">${status.toUpperCase()}</span>`;
     const chargingIcon = dev.is_charging ? ' ⚡' : '';
-    const lastSeenStr = dev.last_seen_at ? new Date(dev.last_seen_at).toLocaleTimeString() : 'Never';
+    const lastSeenStr = this.formatLastSeen(dev.last_seen_at);
 
     let simHtml = '';
     if (dev.sim_cards && dev.sim_cards.length > 0) {
@@ -432,18 +445,18 @@ class GatewayDashboard {
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:16px;">
           <div style="background:var(--bg-app); padding:8px 12px; border-radius:6px; border:1px solid var(--border-subtle);">
             <div style="font-size:11px; color:var(--text-muted);">Battery</div>
-            <div class="mono" style="font-weight:600; font-size:14px;">${dev.battery_level}%${chargingIcon}</div>
+            <div class="mono" style="font-weight:600; font-size:14px;">${lastSeenStr === 'Never' ? '--' : `${dev.battery_level}%${chargingIcon}`}</div>
           </div>
           <div style="background:var(--bg-app); padding:8px 12px; border-radius:6px; border:1px solid var(--border-subtle);">
             <div style="font-size:11px; color:var(--text-muted);">App Version</div>
-            <div class="mono" style="font-weight:600; font-size:14px;">${dev.app_version || '1.0.0'}</div>
+            <div class="mono" style="font-weight:600; font-size:14px;">${this.escapeHtml(dev.app_version || '--')}</div>
           </div>
         </div>
 
         <div style="font-size:11.5px; font-weight:600; color:var(--text-secondary); margin-bottom:8px;">Cellular SIM Modules</div>
         ${simHtml}
 
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; pt:10px; border-top:1px solid var(--border-subtle); font-size:11px; color:var(--text-muted);">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; padding-top:10px; border-top:1px solid var(--border-subtle); font-size:11px; color:var(--text-muted);">
           <span>Last Heartbeat: <span class="mono">${lastSeenStr}</span></span>
           <button class="btn btn-danger btn-sm" data-delete-device="${dev.id}">Unpair</button>
         </div>
@@ -452,8 +465,12 @@ class GatewayDashboard {
 
     card.querySelector(`[data-delete-device="${dev.id}"]`)?.addEventListener('click', async () => {
       if (confirm(`Unpair gateway device "${dev.name}"?`)) {
-        await api.deleteDevice(dev.id);
-        this.showToast('Device unpaired', 'info');
+        try {
+          await api.deleteDevice(dev.id);
+          this.showToast('Device unpaired', 'info');
+        } catch (e) {
+          this.showToast(`Unpair failed: ${e.message}`, 'error');
+        }
         this.loadDevices();
         this.refreshTelemetry();
       }
@@ -480,7 +497,7 @@ class GatewayDashboard {
     if (!tbody) return;
 
     try {
-      this.webhooks = await api.listWebhooks();
+      this.webhooks = (await api.listWebhooks()) || [];
       if (this.webhooks.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--text-muted);">No webhooks registered.</td></tr>`;
         return;
@@ -533,7 +550,7 @@ class GatewayDashboard {
     if (!tbody) return;
 
     try {
-      const deliveries = await api.listWebhookDeliveries();
+      const deliveries = (await api.listWebhookDeliveries()) || [];
       if (deliveries.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:18px; color:var(--text-muted);">No deliveries recorded.</td></tr>`;
         return;
@@ -563,7 +580,7 @@ class GatewayDashboard {
     if (!tbody) return;
 
     try {
-      this.tokens = await api.listTokens();
+      this.tokens = (await api.listTokens()) || [];
       if (this.tokens.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--text-muted);">No API tokens generated.</td></tr>`;
         return;
@@ -635,10 +652,50 @@ class GatewayDashboard {
 
   // --- MODALS ---
   bindModals() {
+    // Generic close buttons, backdrop clicks and Escape
+    document.querySelectorAll('[data-close-modal]').forEach(btn => {
+      btn.addEventListener('click', () => this.closeModal(btn.dataset.closeModal));
+    });
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) this.closeModal(overlay.id);
+      });
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-overlay.open').forEach(m => this.closeModal(m.id));
+      }
+    });
+
+    // Copy-to-clipboard buttons
+    document.querySelectorAll('[data-copy-target]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const text = document.getElementById(btn.dataset.copyTarget)?.textContent || '';
+        this.copyText(text);
+      });
+    });
+
+    // Settings Modal
+    document.getElementById('btn-save-settings')?.addEventListener('click', () => {
+      const token = document.getElementById('settings-token-input').value.trim();
+      if (!token) {
+        this.showToast('Admin token is required', 'error');
+        return;
+      }
+      api.setToken(token);
+      this.closeModal('settings-modal');
+      this.showToast('Settings saved', 'success');
+      this.refreshTelemetry();
+      this.switchView(this.currentView);
+    });
+
     // Pair Modal
     document.getElementById('btn-open-pair-modal')?.addEventListener('click', () => this.openPairModal());
-    document.getElementById('btn-close-pair-modal')?.addEventListener('click', () => {
-      document.getElementById('pair-modal').classList.remove('open');
+    document.getElementById('btn-close-pair-modal')?.addEventListener('click', () => this.closeModal('pair-modal'));
+    let pairUrlTimer = null;
+    document.getElementById('pair-server-input')?.addEventListener('input', () => {
+      clearTimeout(pairUrlTimer);
+      pairUrlTimer = setTimeout(() => this.renderPairingCode(), 250);
     });
 
     // Webhook Modal
@@ -720,31 +777,133 @@ class GatewayDashboard {
     });
   }
 
+  closeModal(id) {
+    document.getElementById(id)?.classList.remove('open');
+    if (id === 'pair-modal') {
+      this.pendingPairDeviceId = null;
+      this.pairing = null;
+    }
+  }
+
+  openSettingsModal(authFailed = false) {
+    const modal = document.getElementById('settings-modal');
+    if (!modal || (authFailed && modal.classList.contains('open'))) return;
+    document.getElementById('settings-auth-notice').style.display = authFailed ? 'block' : 'none';
+    document.getElementById('settings-token-input').value = authFailed ? '' : api.token;
+    modal.classList.add('open');
+    document.getElementById('settings-token-input').focus();
+  }
+
+  defaultPairServerUrl() {
+    const saved = localStorage.getItem('htsms_pair_server_url');
+    return saved || window.location.origin;
+  }
+
   async openPairModal() {
     const modal = document.getElementById('pair-modal');
     modal.classList.add('open');
 
+    const serverInput = document.getElementById('pair-server-input');
+    serverInput.value = this.defaultPairServerUrl();
+    this.setPairStatus('waiting', 'Generating pairing code…');
+
     try {
       const res = await api.pairDevice('Android Gateway Device');
-      const pairingPayload = JSON.stringify({
-        server_url: window.location.origin,
-        ws_url: `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/device`,
-        device_id: res.device_id,
-        token: res.token,
-      });
-
-      const canvas = document.getElementById('pair-qr-canvas');
-      renderQRCode(canvas, pairingPayload);
-
-      document.getElementById('pair-token-text').textContent = res.token;
-      document.getElementById('pair-server-text').textContent = window.location.origin;
+      this.pairing = res;
+      this.pendingPairDeviceId = res.device_id;
+      this.renderPairingCode();
+      this.setPairStatus('waiting', 'Waiting for the phone to connect…');
+      this.loadDevices();
     } catch (e) {
-      this.showToast(`Pairing setup failed: ${e.message}`, 'error');
+      this.setPairStatus('error', `Could not create pairing code: ${e.message}`);
     }
   }
 
+  renderPairingCode() {
+    if (!this.pairing) return;
+    const serverUrl = document.getElementById('pair-server-input').value.trim().replace(/\/+$/, '');
+    const hint = document.getElementById('pair-server-hint');
+
+    let host = '';
+    try {
+      host = new URL(serverUrl).hostname;
+    } catch {
+      hint.textContent = 'Enter a full URL such as http://192.168.1.20:8080';
+      hint.classList.add('warning');
+      return;
+    }
+
+    if (['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(host)) {
+      hint.textContent = `"${host}" points at the phone itself. Use this computer's LAN IP or public domain instead.`;
+      hint.classList.add('warning');
+    } else {
+      hint.textContent = 'The phone must be able to reach this address.';
+      hint.classList.remove('warning');
+      localStorage.setItem('htsms_pair_server_url', serverUrl);
+    }
+
+    const payload = JSON.stringify({
+      v: 1,
+      server_url: serverUrl,
+      device_id: this.pairing.device_id,
+      token: this.pairing.token,
+    });
+
+    try {
+      renderQRCode(document.getElementById('pair-qr-canvas'), payload);
+    } catch (e) {
+      this.setPairStatus('error', `QR render failed: ${e.message}`);
+    }
+    document.getElementById('pair-token-text').textContent = this.pairing.token;
+    document.getElementById('pair-server-text').textContent = serverUrl;
+  }
+
+  setPairStatus(state, text) {
+    const box = document.getElementById('pair-status');
+    if (!box) return;
+    box.classList.toggle('connected', state === 'connected');
+    const dot = box.querySelector('.pulse-dot');
+    dot.className = 'pulse-dot' + (state === 'waiting' ? ' waiting' : state === 'error' ? ' offline' : '');
+    document.getElementById('pair-status-text').textContent = text;
+  }
+
+  markPairingConnected() {
+    this.pendingPairDeviceId = null;
+    this.setPairStatus('connected', 'Phone connected! You can close this window.');
+    this.showToast('Android gateway paired and online', 'success');
+    this.loadDevices();
+  }
+
   showTokenResultModal(rawKey) {
-    alert(`IMPORTANT: Copy your API Token now. It will not be shown again:\n\n${rawKey}`);
+    document.getElementById('token-result-text').textContent = rawKey;
+    document.getElementById('token-result-modal').classList.add('open');
+  }
+
+  async copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      this.showToast('Copied to clipboard', 'success');
+    } catch {
+      // Clipboard API needs HTTPS or localhost; fall back to a hidden textarea.
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      this.showToast(ok ? 'Copied to clipboard' : 'Copy failed, select the text manually', ok ? 'success' : 'error');
+    }
+  }
+
+  formatLastSeen(value) {
+    const t = value ? new Date(value) : null;
+    // Go's zero time (year 1) means the phone has never connected.
+    if (!t || isNaN(t) || t.getFullYear() < 2000) return 'Never';
+    const secs = Math.round((Date.now() - t.getTime()) / 1000);
+    if (secs < 60) return 'just now';
+    if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)} h ago`;
+    return t.toLocaleString();
   }
 
   showToast(message, type = 'info') {

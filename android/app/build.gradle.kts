@@ -12,8 +12,8 @@ android {
         applicationId = "com.httpsms.gateway"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -36,6 +36,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 
@@ -61,5 +62,11 @@ dependencies {
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Background watchdog that restarts the gateway if the OS kills it
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // QR scanner for dashboard pairing (no Google Play services needed)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }
 

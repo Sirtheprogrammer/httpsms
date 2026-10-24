@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Gateway" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#7EA2FF</item>
+        <item name="colorOnPrimary">#0B1E5B</item>
+        <item name="colorPrimaryContainer">#1E3A8A</item>
+        <item name="colorOnPrimaryContainer">#DBE4FF</item>
+        <item name="colorSecondaryContainer">#1E293B</item>
+        <item name="colorOnSecondaryContainer">#E2E8F0</item>
+        <item name="android:colorBackground">#0B1120</item>
+        <item name="colorSurface">#0B1120</item>
+        <item name="colorSurfaceContainerLow">#131C2E</item>
+        <item name="android:statusBarColor">#0B1120</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">#0B1120</item>
+    </style>
+</resources>

@@ -1,20 +1,50 @@
 package com.httpsms.gateway.service
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.*
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
+import android.os.Build
+import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.httpsms.gateway.BuildConfig
+import com.httpsms.gateway.core.GatewayConfig
+import com.httpsms.gateway.core.GatewayState
+import com.httpsms.gateway.core.GatewayState.Connection
 import com.httpsms.gateway.data.local.AppDatabase
 import com.httpsms.gateway.ota.OtaUpdateManager
 import com.httpsms.gateway.sms.SmsManagerHandler
-import kotlinx.coroutines.*
-import okhttp3.*
+import com.httpsms.gateway.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 
 class GatewayForegroundService : Service() {
@@ -29,221 +59,427 @@ class GatewayForegroundService : Service() {
         const val ACTION_SYNC_STATUS = "com.httpsms.gateway.SYNC_STATUS"
 
         private const val TAG = "GatewayService"
+        private const val HEARTBEAT_INTERVAL_MS = 30_000L
+        private const val MIN_BACKOFF_MS = 2_000L
+        private const val MAX_BACKOFF_MS = 60_000L
+        private const val AUTH_RETRY_MS = 5 * 60_000L
+        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60_000L
+
+        /** The running service, so receivers can hand work over without a new start request. */
+        @Volatile
+        var instance: GatewayForegroundService? = null
+            private set
+
+        /** Starts (or pokes) the gateway. Returns false if Android refused a background start. */
+        fun start(context: Context, action: String = ACTION_START, extras: Intent? = null): Boolean {
+            val intent = Intent(context, GatewayForegroundService::class.java).setAction(action)
+            extras?.extras?.let { intent.putExtras(it) }
+            return try {
+                ContextCompat.startForegroundService(context, intent)
+                true
+            } catch (e: Exception) {
+                // ForegroundServiceStartNotAllowedException (Android 12+) when started from the background
+                // without an exemption. Battery-optimisation exemption lifts this restriction.
+                Log.w(TAG, "Could not start gateway service: ${e.message}")
+                false
+            }
+        }
+
+        fun stop(context: Context) {
+            GatewayConfig(context).serviceEnabled = false
+            instance?.shutdown() ?: GatewayState.setConnection(Connection.STOPPED)
+        }
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var webSocket: WebSocket? = null
-    private var wakeLock: PowerManager.WakeLock? = null
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
+    private lateinit var config: GatewayConfig
     private lateinit var smsHandler: SmsManagerHandler
     private lateinit var otaManager: OtaUpdateManager
-    private var isConnected = false
+
+    private var webSocket: WebSocket? = null
+    @Volatile private var isConnected = false
+    private var reconnectJob: Job? = null
+    private var backoffMs = MIN_BACKOFF_MS
+    private var notificationText = "Starting…"
+    private val pendingFrames = ConcurrentLinkedQueue<String>()
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        config = GatewayConfig(this)
         smsHandler = SmsManagerHandler(this)
         otaManager = OtaUpdateManager(this)
 
-        acquireWakeLock()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Gateway Initializing..."))
-
-        connectWebSocket()
+        startInForeground()
+        acquireLocks()
+        registerNetworkCallback()
         startHeartbeatLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
-            ACTION_FLUSH_OUTBOX -> {
-                flushOutbox()
-            }
+        // Every startForegroundService() call must be answered with startForeground().
+        startInForeground()
+
+        val action = intent?.action
+        if (action == ACTION_STOP) {
+            config.serviceEnabled = false
+            shutdown()
+            return START_NOT_STICKY
+        }
+        if (action == ACTION_START) config.serviceEnabled = true
+
+        if (!config.serviceEnabled || !config.isPaired) {
+            // Sticky restart after the user stopped it, or nothing to connect to.
+            GatewayState.setConnection(
+                Connection.STOPPED,
+                if (config.isPaired) "" else "Not paired with a server yet",
+            )
+            shutdown()
+            return START_NOT_STICKY
+        }
+
+        GatewayWatchdogWorker.schedule(this)
+
+        when (action) {
+            ACTION_FLUSH_OUTBOX -> flushOutbox()
             ACTION_SYNC_STATUS -> {
-                val messageId = intent.getStringExtra("message_id")
-                val status = intent.getStringExtra("status")
-                val errorMessage = intent.getStringExtra("error_message") ?: ""
+                val messageId = intent?.getStringExtra("message_id")
+                val status = intent?.getStringExtra("status")
                 if (messageId != null && status != null) {
-                    reportMessageStatus(messageId, status, errorMessage)
+                    reportMessageStatus(messageId, status, intent.getStringExtra("error_message") ?: "")
                 }
             }
-            else -> {
-                flushOutbox()
-            }
         }
+
+        ensureConnected()
         return START_STICKY
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        instance = null
         serviceScope.cancel()
         webSocket?.close(1000, "Service destroyed")
-        releaseWakeLock()
+        webSocket = null
+        isConnected = false
+        unregisterNetworkCallback()
+        releaseLocks()
+        if (config.serviceEnabled && config.isPaired) {
+            GatewayState.setConnection(Connection.DISCONNECTED, "Service was stopped by the system, restarting…")
+        }
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun acquireWakeLock() {
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HttpSms::GatewayWakeLock").apply {
-            setReferenceCounted(false)
-            acquire(24 * 60 * 60 * 1000L) // 24h
-        }
+    /** Drops the current socket and connects again, e.g. after re-pairing with another server. */
+    fun reconnectNow() {
+        config.serviceEnabled = true
+        backoffMs = MIN_BACKOFF_MS
+        serviceScope.launch { connect() }
     }
 
-    private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) it.release()
+    fun shutdown() {
+        reconnectJob?.cancel()
+        webSocket?.close(1000, "Stopped by user")
+        webSocket = null
+        isConnected = false
+        GatewayState.setConnection(Connection.STOPPED, if (config.isPaired) "" else "Not paired with a server yet")
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    // region Foreground notification
+
+    private fun startInForeground() {
+        val notification = buildNotification(notificationText)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "HttpSMS Gateway Live Telemetry",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Keeps persistent cellular modem bridge online"
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Gateway status",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Keeps the SMS gateway connected to your server"
+            setShowBadge(false)
         }
+        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
     private fun buildNotification(statusText: String): Notification {
+        val openApp = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val stop = PendingIntent.getService(
+            this, 1,
+            Intent(this, GatewayForegroundService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("HttpSMS Gateway")
             .setContentText(statusText)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(com.httpsms.gateway.R.drawable.ic_stat_gateway)
+            .setContentIntent(openApp)
+            .addAction(0, "Stop", stop)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
 
     private fun updateNotification(text: String) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(text))
+        notificationText = text
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    private fun getSavedServerConfig(): Pair<String, String> {
-        val prefs = getSharedPreferences("httpsms_config", Context.MODE_PRIVATE)
-        val serverUrl = prefs.getString("server_url", "http://10.0.2.2:8080") ?: "http://10.0.2.2:8080"
-        val token = prefs.getString("device_token", "htdev_default") ?: "htdev_default"
-        return Pair(serverUrl, token)
-    }
+    // endregion
 
-    private fun connectWebSocket() {
-        serviceScope.launch {
-            val (serverUrl, token) = getSavedServerConfig()
-            val wsBase = serverUrl.replace("http://", "ws://").replace("https://", "wss://")
-            val wsUrl = "$wsBase/ws/device?token=$token"
+    // region Keep-alive: CPU/Wi-Fi locks, network changes, heartbeat
 
-            Log.i(TAG, "Connecting WebSocket to: $wsUrl")
-            val request = Request.Builder().url(wsUrl).build()
-
-            client.newWebSocket(request, object : WebSocketListener() {
-                override fun onOpen(ws: WebSocket, response: Response) {
-                    webSocket = ws
-                    isConnected = true
-                    Log.i(TAG, "WebSocket Connected successfully")
-                    updateNotification("Online · Connected to Gateway Server")
-
-                    sendHeartbeat(ws)
-                    flushOutbox()
-                }
-
-                override fun onMessage(ws: WebSocket, text: String) {
-                    handleIncomingFrame(text)
-                }
-
-                override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                    isConnected = false
-                    Log.w(TAG, "WebSocket closed: $reason ($code)")
-                    updateNotification("Disconnected · Reconnecting...")
-                    scheduleReconnect()
-                }
-
-                override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                    isConnected = false
-                    Log.e(TAG, "WebSocket failure: ${t.message}")
-                    updateNotification("Connection Error · Retrying...")
-                    scheduleReconnect()
-                }
-            })
+    private fun acquireLocks() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HttpSms::Gateway").apply {
+            setReferenceCounted(false)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        @Suppress("DEPRECATION") // HIGH_PERF is still the mode that stops Wi-Fi sleeping with the screen off
+        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "HttpSms::GatewayWifi").apply {
+            setReferenceCounted(false)
+            acquire()
         }
     }
 
-    private fun scheduleReconnect() {
-        serviceScope.launch {
-            delay(5000)
-            if (!isConnected) {
-                connectWebSocket()
+    private fun renewWakeLock() {
+        // A timed lock that is re-armed by the heartbeat loop: never leaks if the loop dies.
+        wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS)
+    }
+
+    private fun releaseLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wifiLock?.let { if (it.isHeld) it.release() }
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (!isConnected && config.serviceEnabled) {
+                    Log.i(TAG, "Network available, reconnecting now")
+                    backoffMs = MIN_BACKOFF_MS
+                    serviceScope.launch { connect() }
+                }
             }
         }
+        try {
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        } catch (e: Exception) {
+            Log.w(TAG, "Network callback unavailable: ${e.message}")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkCallback?.let {
+            try {
+                getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it)
+            } catch (_: Exception) {
+            }
+        }
+        networkCallback = null
     }
 
     private fun startHeartbeatLoop() {
         serviceScope.launch {
             while (isActive) {
-                delay(30000)
-                webSocket?.let { ws ->
-                    if (isConnected) {
-                        sendHeartbeat(ws)
-                    }
+                delay(HEARTBEAT_INTERVAL_MS)
+                renewWakeLock()
+                val ws = webSocket
+                if (isConnected && ws != null) {
+                    sendHeartbeat(ws)
+                } else {
+                    ensureConnected()
                 }
             }
         }
     }
 
+    // endregion
+
+    // region WebSocket connection
+
+    @Synchronized
+    private fun ensureConnected() {
+        if (isConnected || webSocket != null || reconnectJob?.isActive == true) return
+        connect()
+    }
+
+    @Synchronized
+    private fun connect() {
+        if (!config.isPaired) return
+        reconnectJob?.cancel()
+        reconnectJob = null
+
+        // Detach the old socket first so its late callbacks are ignored.
+        val old = webSocket
+        webSocket = null
+        isConnected = false
+        old?.cancel()
+
+        val request = try {
+            Request.Builder().url(config.webSocketUrl()).build()
+        } catch (e: IllegalArgumentException) {
+            GatewayState.setConnection(Connection.DISCONNECTED, "Invalid server URL: ${config.serverUrl}")
+            updateNotification("Invalid server URL")
+            return
+        }
+
+        Log.i(TAG, "Connecting to ${config.serverUrl}")
+        GatewayState.setConnection(Connection.CONNECTING, config.serverUrl)
+        updateNotification("Connecting to ${config.serverUrl}…")
+        webSocket = client.newWebSocket(request, Listener())
+    }
+
+    @Synchronized
+    private fun scheduleReconnect(delayMs: Long) {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = serviceScope.launch {
+            delay(delayMs)
+            connect()
+        }
+    }
+
+    private fun onDisconnected(ws: WebSocket, reason: String, httpCode: Int?) {
+        synchronized(this) {
+            if (ws !== webSocket) return
+            webSocket = null
+            isConnected = false
+        }
+        if (httpCode == 401) {
+            Log.w(TAG, "Server rejected device token")
+            GatewayState.setConnection(
+                Connection.AUTH_FAILED,
+                "The server rejected this phone's token. It may have been unpaired. Scan a new pairing QR.",
+            )
+            updateNotification("Pairing rejected · scan a new QR code")
+            scheduleReconnect(AUTH_RETRY_MS)
+            return
+        }
+
+        val waitSec = backoffMs / 1000
+        Log.w(TAG, "Disconnected: $reason. Retrying in ${waitSec}s")
+        GatewayState.setConnection(Connection.DISCONNECTED, "$reason · retrying in ${waitSec}s")
+        updateNotification("Offline · retrying in ${waitSec}s")
+        scheduleReconnect(backoffMs)
+        backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+    }
+
+    private inner class Listener : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (webSocket !== this@GatewayForegroundService.webSocket) return
+            isConnected = true
+            backoffMs = MIN_BACKOFF_MS
+            Log.i(TAG, "Connected")
+            GatewayState.setConnection(Connection.CONNECTED, config.serverUrl)
+            updateNotification("Online · ${config.serverUrl}")
+            sendHeartbeat(webSocket)
+            flushPendingFrames(webSocket)
+            flushOutbox()
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            if (webSocket === this@GatewayForegroundService.webSocket) handleIncomingFrame(text)
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            webSocket.close(1000, null)
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            onDisconnected(webSocket, "Connection closed${if (reason.isNotBlank()) ": $reason" else ""}", null)
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            val reason = when {
+                response != null -> "Server responded HTTP ${response.code}"
+                else -> t.message ?: t.javaClass.simpleName
+            }
+            onDisconnected(webSocket, reason, response?.code)
+        }
+    }
+
+    /** Sends now if online, otherwise keeps the frame until the next connection. */
+    private fun sendOrQueue(frame: String) {
+        val ws = webSocket
+        if (!(isConnected && ws != null && ws.send(frame))) pendingFrames.add(frame)
+    }
+
+    private fun flushPendingFrames(ws: WebSocket) {
+        while (true) {
+            val frame = pendingFrames.peek() ?: break
+            if (!ws.send(frame)) break
+            pendingFrames.poll()
+        }
+    }
+
+    // endregion
+
+    // region Protocol
+
     private fun sendHeartbeat(ws: WebSocket) {
-        val batteryStatus = getBatteryTelemetry()
-        val sims = smsHandler.getActiveSimCards()
-
-        val data = mapOf(
-            "battery_level" to batteryStatus.first,
-            "is_charging" to batteryStatus.second,
-            "app_version" to "1.0.0",
-            "app_version_code" to otaManager.getCurrentVersionCode(),
-            "sim_cards" to sims
-        )
-
+        val (batteryPct, isCharging) = getBatteryTelemetry()
         val frame = mapOf(
             "action" to "device.heartbeat",
-            "data" to data
+            "data" to mapOf(
+                "battery_level" to batteryPct,
+                "is_charging" to isCharging,
+                "app_version" to BuildConfig.VERSION_NAME,
+                "app_version_code" to BuildConfig.VERSION_CODE,
+                "sim_cards" to smsHandler.getActiveSimCards(),
+            ),
         )
-
-        ws.send(gson.toJson(frame))
+        if (ws.send(gson.toJson(frame))) GatewayState.heartbeatSent()
     }
 
     private fun getBatteryTelemetry(): Pair<Int, Boolean> {
-        val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-        val batteryStatus: Intent? = registerReceiver(null, ifilter)
-
-        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: 50
-        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: 100
-        val batteryPct = ((level / scale.toFloat()) * 100).toInt()
-
+        val batteryStatus: Intent? = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val batteryPct = if (level >= 0 && scale > 0) (level * 100) / scale else 0
         val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                status == BatteryManager.BATTERY_STATUS_FULL
-
+            status == BatteryManager.BATTERY_STATUS_FULL
         return Pair(batteryPct, isCharging)
     }
 
     private fun handleIncomingFrame(jsonStr: String) {
         try {
             val root = JsonParser.parseString(jsonStr).asJsonObject
-            val action = root.get("action")?.asString ?: return
-
-            when (action) {
+            when (root.get("action")?.asString) {
                 "sms.send" -> {
                     val data = root.getAsJsonObject("data")
                     val messageId = data.get("id").asString
@@ -251,32 +487,25 @@ class GatewayForegroundService : Service() {
                     val body = data.get("body").asString
                     val simSlot = data.get("sim_slot")?.asInt ?: 0
 
-                    Log.i(TAG, "Processing send command for message $messageId to $recipient")
-                    val dispatched = smsHandler.sendSms(messageId, recipient, body, simSlot)
-                    if (!dispatched) {
-                        reportMessageStatus(messageId, "failed", "Local SmsManager dispatch failure")
+                    Log.i(TAG, "Sending message $messageId")
+                    if (smsHandler.sendSms(messageId, recipient, body, simSlot)) {
+                        GatewayState.smsSent()
+                    } else {
+                        reportMessageStatus(messageId, "failed", "Phone could not hand the SMS to the carrier")
                     }
                 }
                 "ack" -> {
-                    val key = root.get("idempotency_key")?.asString
-                    if (key != null) {
-                        serviceScope.launch {
-                            val db = AppDatabase.getInstance(applicationContext)
-                            db.outboxDao().markAcknowledged(key)
-                            db.outboxDao().deleteAcknowledged()
-                            Log.i(TAG, "Server ACK received for key: $key")
-                        }
+                    val key = root.get("idempotency_key")?.asString ?: return
+                    serviceScope.launch {
+                        val dao = AppDatabase.getInstance(applicationContext).outboxDao()
+                        dao.markAcknowledged(key)
+                        dao.deleteAcknowledged()
                     }
                 }
-                "ota.notify" -> {
-                    // Check for update
-                    serviceScope.launch {
-                        val (serverUrl, _) = getSavedServerConfig()
-                        val res = otaManager.checkForUpdates(serverUrl)
-                        if (res?.update_available == true && res.release != null && res.download_url != null) {
-                            Log.i(TAG, "New OTA release available: ${res.release.version}. Starting download...")
-                            otaManager.downloadAndInstall(serverUrl, res.download_url, res.release.checksum_sha256)
-                        }
+                "ota.notify" -> serviceScope.launch {
+                    val res = otaManager.checkForUpdates(config.serverUrl)
+                    if (res?.update_available == true && res.release != null && res.download_url != null) {
+                        otaManager.downloadAndInstall(config.serverUrl, res.download_url, res.release.checksum_sha256)
                     }
                 }
             }
@@ -287,35 +516,32 @@ class GatewayForegroundService : Service() {
 
     fun flushOutbox() {
         serviceScope.launch {
-            if (!isConnected || webSocket == null) return@launch
-            val db = AppDatabase.getInstance(applicationContext)
-            val pending = db.outboxDao().getPending()
-
-            for (item in pending) {
+            val ws = webSocket
+            if (!isConnected || ws == null) return@launch
+            val dao = AppDatabase.getInstance(applicationContext).outboxDao()
+            for (item in dao.getPending()) {
                 val frame = JsonObject().apply {
                     addProperty("action", "sms.received")
                     add("data", JsonParser.parseString(item.payloadJson))
                     addProperty("idempotency_key", item.idempotencyKey)
                 }
-
-                val success = webSocket?.send(gson.toJson(frame)) ?: false
-                if (success) {
-                    db.outboxDao().incrementRetry(item.id)
-                }
+                if (!ws.send(gson.toJson(frame))) break
+                dao.incrementRetry(item.id)
             }
         }
     }
 
-    private fun reportMessageStatus(messageId: String, status: String, errorMessage: String) {
+    fun reportMessageStatus(messageId: String, status: String, errorMessage: String) {
         val frame = mapOf(
             "action" to "sms.status",
             "data" to mapOf(
                 "message_id" to messageId,
                 "status" to status,
-                "error_message" to errorMessage
-            )
+                "error_message" to errorMessage,
+            ),
         )
-        webSocket?.send(gson.toJson(frame))
+        sendOrQueue(gson.toJson(frame))
     }
-}
 
+    // endregion
+}

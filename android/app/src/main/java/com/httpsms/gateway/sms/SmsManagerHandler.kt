@@ -8,17 +8,20 @@ import android.os.Build
 import android.telephony.SmsManager
 import android.telephony.SubscriptionInfo
 import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 import android.util.Log
+import com.google.gson.annotations.SerializedName
 
+// Field names match the server's domain.SimCard JSON tags.
 data class SimCardInfo(
-    val slotIndex: Int,
-    val subId: Int,
-    val carrierName: String,
-    val phoneNumber: String,
-    val countryIso: String,
-    val signalLevel: Int = 3,
-    val signalDbm: Int = -85,
-    val isActive: Boolean = true
+    @SerializedName("slot_index") val slotIndex: Int,
+    @SerializedName("sub_id") val subId: Int,
+    @SerializedName("carrier_name") val carrierName: String,
+    @SerializedName("phone_number") val phoneNumber: String,
+    @SerializedName("country_iso") val countryIso: String,
+    @SerializedName("signal_level") val signalLevel: Int = 0,
+    @SerializedName("signal_dbm") val signalDbm: Int = 0,
+    @SerializedName("is_active") val isActive: Boolean = true
 )
 
 class SmsManagerHandler(private val context: Context) {
@@ -39,13 +42,16 @@ class SmsManagerHandler(private val context: Context) {
         try {
             val activeSubscriptions: List<SubscriptionInfo>? = subscriptionManager.activeSubscriptionInfoList
             activeSubscriptions?.forEach { subInfo ->
+                val (level, dbm) = readSignal(subInfo.subscriptionId)
                 simList.add(
                     SimCardInfo(
                         slotIndex = subInfo.simSlotIndex,
                         subId = subInfo.subscriptionId,
                         carrierName = subInfo.carrierName?.toString() ?: "Unknown",
-                        phoneNumber = subInfo.number ?: "",
+                        phoneNumber = readPhoneNumber(subscriptionManager, subInfo),
                         countryIso = subInfo.countryIso ?: "",
+                        signalLevel = level,
+                        signalDbm = dbm,
                         isActive = true
                     )
                 )
@@ -54,6 +60,34 @@ class SmsManagerHandler(private val context: Context) {
             Log.e(TAG, "Error enumerating active subscriptions: ${e.message}")
         }
         return simList
+    }
+
+    /** Signal bars (0-4) and strength in dBm for a subscription; zeros when unavailable. */
+    private fun readSignal(subId: Int): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return Pair(0, 0)
+        return try {
+            val tm = (context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
+                .createForSubscriptionId(subId)
+            val strength = tm.signalStrength ?: return Pair(0, 0)
+            val dbm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                strength.cellSignalStrengths.firstOrNull()?.dbm?.takeIf { it != Int.MAX_VALUE } ?: 0
+            } else 0
+            Pair(strength.level, dbm)
+        } catch (e: Exception) {
+            Pair(0, 0)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readPhoneNumber(sm: SubscriptionManager, subInfo: SubscriptionInfo): String = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            sm.getPhoneNumber(subInfo.subscriptionId)
+        } else {
+            @Suppress("DEPRECATION")
+            subInfo.number ?: ""
+        }
+    } catch (e: Exception) {
+        ""
     }
 
     fun sendSms(messageId: String, recipient: String, body: String, preferredSlot: Int = 0): Boolean {

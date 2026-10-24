@@ -60,19 +60,33 @@ make docker-up
 
 ##  Android Gateway App Setup
 
-1. Open the project in Android Studio (`/android` directory).
-2. Build and install the APK onto your Android phone:
+1. Install the APK. Every push to `main` that touches `android/` builds one and attaches it to a
+   [GitHub release](https://github.com/Sirtheprogrammer/httpsms/releases). To build locally (JDK 17–21):
    ```bash
-   ./gradlew assembleDebug
+   cd android && ./gradlew assembleDebug
    adb install -r app/build/outputs/apk/debug/app-debug.apk
    ```
-3. Launch the app and grant required permissions:
-   - SMS Receive & Send (`RECEIVE_SMS`, `SEND_SMS`)
-   - Phone State & SIM Info (`READ_PHONE_STATE`, `READ_PHONE_NUMBERS`)
-   - Battery Optimization Exemption
-4. Open the Web Dashboard at `http://<your-server-ip>:8080` -> Navigate to **Gateway Nodes** -> Click **Pair New Phone**.
-5. Scan the QR code or enter the Server URL and Token into the Android app.
-6. Tap **Start Gateway Service**. Your phone's SIM cards, battery level, and signal strength will immediately appear on the dashboard!
+2. Open the dashboard → **Gateway Nodes** → **Pair New Phone**. Check the
+   **Server address the phone will use**: it must be reachable from the phone (your machine's LAN IP or
+   public domain, never `localhost`).
+3. In the app tap **Scan pairing QR** and point it at the code. The app saves the server and token,
+   asks for SMS permissions and connects. The dashboard confirms when the phone is online.
+   (No camera? Use **Enter details manually** with the URL and token from *Can't scan?*.)
+4. Work through the app's **Keep running in the background** checklist: allow notifications,
+   set battery to unrestricted, and turn on the vendor autostart switch where the phone has one.
+
+### Background survival
+
+The gateway runs as a `remoteMessaging` foreground service with a persistent notification and:
+
+- holds a renewable partial wake lock and a Wi-Fi lock so the socket survives screen-off;
+- reconnects with exponential backoff (2 s → 60 s) and immediately when the network returns;
+- restarts after reboot and after app updates (only if it was running before);
+- runs a WorkManager watchdog every 15 minutes that restarts the service if the OS killed it.
+
+Android still lets some vendors (Xiaomi, Huawei, Oppo, Vivo, Samsung…) kill background apps
+unless the user exempts them, which is what the in-app checklist and the
+[dontkillmyapp.com](https://dontkillmyapp.com) link are for.
 
 ---
 

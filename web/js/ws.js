@@ -4,8 +4,6 @@ export class TelemetrySocket {
     this.listeners = new Map();
     this.reconnectAttempts = 0;
     this.maxReconnectDelay = 10000;
-    this.latencyMs = 0;
-    this.pingInterval = null;
     this.statusListeners = [];
   }
 
@@ -19,7 +17,6 @@ export class TelemetrySocket {
       this.ws.onopen = () => {
         this.reconnectAttempts = 0;
         this.notifyStatus(true);
-        this.startLatencyPing();
       };
 
       this.ws.onmessage = (event) => {
@@ -35,7 +32,6 @@ export class TelemetrySocket {
 
       this.ws.onclose = () => {
         this.notifyStatus(false);
-        this.stopLatencyPing();
         this.scheduleReconnect();
       };
 
@@ -51,25 +47,6 @@ export class TelemetrySocket {
     const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), this.maxReconnectDelay);
     this.reconnectAttempts++;
     setTimeout(() => this.connect(), delay);
-  }
-
-  startLatencyPing() {
-    this.stopLatencyPing();
-    this.pingInterval = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const start = performance.now();
-        // Browser WebSocket does not expose raw ping frame, so we measure round-trip to server or estimate
-        this.latencyMs = Math.round(performance.now() - start + Math.random() * 4 + 8);
-        this.emit('_latency', this.latencyMs);
-      }
-    }, 5000);
-  }
-
-  stopLatencyPing() {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
   }
 
   on(event, callback) {
@@ -90,7 +67,7 @@ export class TelemetrySocket {
   }
 
   notifyStatus(isOnline) {
-    this.statusListeners.forEach(cb => cb(isOnline, this.latencyMs));
+    this.statusListeners.forEach(cb => cb(isOnline));
   }
 
   emit(event, data) {

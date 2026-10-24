@@ -33,9 +33,16 @@ export class ApiClient {
         window.dispatchEvent(new CustomEvent('auth:required'));
       }
 
-      const data = await resp.json();
+      // Error responses from proxies or http.Error may not be JSON.
+      const text = await resp.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        if (resp.ok) throw new Error('Server returned an invalid response');
+      }
       if (!resp.ok) {
-        throw new Error(data.error?.message || `HTTP ${resp.status}`);
+        throw new Error(data?.error?.message || text.trim() || `HTTP ${resp.status}`);
       }
       return data;
     } catch (err) {
@@ -136,6 +143,18 @@ export class ApiClient {
       method: 'POST',
       body: formData,
     });
+  }
+
+  // Round-trip time to the public health endpoint, or null when unreachable.
+  async measureLatency() {
+    const start = performance.now();
+    try {
+      const resp = await fetch(`${this.baseUrl}/api/v1/health`, { cache: 'no-store' });
+      if (!resp.ok) return null;
+      return Math.round(performance.now() - start);
+    } catch {
+      return null;
+    }
   }
 
   // Stats

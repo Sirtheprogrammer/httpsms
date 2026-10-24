@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#2563EB</color>
+    <color name="status_online">#16A34A</color>
+    <color name="status_connecting">#D97706</color>
+    <color name="status_offline">#DC2626</color>
+    <color name="status_stopped">#64748B</color>
+    <color name="launcher_background">#0F172A</color>
+</resources>

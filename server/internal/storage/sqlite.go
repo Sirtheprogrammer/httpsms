@@ -250,7 +250,7 @@ func (s *DB) ListDevices() ([]domain.Device, error) {
 	}
 	defer rows.Close()
 
-	var devices []domain.Device
+	devices := []domain.Device{}
 	for rows.Next() {
 		var d domain.Device
 		var isCharging int
@@ -265,6 +265,15 @@ func (s *DB) ListDevices() ([]domain.Device, error) {
 		devices = append(devices, d)
 	}
 	return devices, nil
+}
+
+// MarkAllDevicesOffline resets stale "online" rows left behind by a previous
+// server process; live connections flip them back on their next heartbeat.
+func (s *DB) MarkAllDevicesOffline() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE devices SET status = 'offline'")
+	return err
 }
 
 func (s *DB) DeleteDevice(id string) error {
@@ -296,6 +305,11 @@ func (s *DB) ReplaceDeviceSimCards(deviceID string, sims []domain.SimCard) error
 	defer stmt.Close()
 
 	for _, sim := range sims {
+		// Phones don't assign SIM IDs, and an empty ID collides on the primary key
+		// as soon as a second SIM is present.
+		if sim.ID == "" {
+			sim.ID = fmt.Sprintf("%s-sim%d", deviceID, sim.SlotIndex)
+		}
 		isActive := 0
 		if sim.IsActive {
 			isActive = 1
@@ -316,7 +330,7 @@ func (s *DB) GetDeviceSimCards(deviceID string) ([]domain.SimCard, error) {
 	}
 	defer rows.Close()
 
-	var sims []domain.SimCard
+	sims := []domain.SimCard{}
 	for rows.Next() {
 		var sim domain.SimCard
 		var isActive int
@@ -420,7 +434,7 @@ func (s *DB) ListMessages(direction, search string, limit, offset int) ([]domain
 	}
 	defer rows.Close()
 
-	var messages []domain.Message
+	messages := []domain.Message{}
 	for rows.Next() {
 		var m domain.Message
 		if err := rows.Scan(&m.ID, &m.Direction, &m.DeviceID, &m.SimCardID, &m.SimSlot, &m.Sender, &m.Recipient, &m.Body, &m.Status, &m.IdempotencyKey, &m.PartsCount, &m.ErrorMessage, &m.ScheduledAt, &m.SentAt, &m.DeliveredAt, &m.CreatedAt); err != nil {
@@ -458,7 +472,7 @@ func (s *DB) ListActiveWebhooksForEvent(eventType string) ([]domain.Webhook, err
 	}
 	defer rows.Close()
 
-	var webhooks []domain.Webhook
+	webhooks := []domain.Webhook{}
 	for rows.Next() {
 		var w domain.Webhook
 		var eventsJSON string
@@ -491,7 +505,7 @@ func (s *DB) ListWebhooks() ([]domain.Webhook, error) {
 	}
 	defer rows.Close()
 
-	var webhooks []domain.Webhook
+	webhooks := []domain.Webhook{}
 	for rows.Next() {
 		var w domain.Webhook
 		var eventsJSON string
@@ -552,7 +566,7 @@ func (s *DB) ListWebhookDeliveries(webhookID string, limit int) ([]domain.Webhoo
 	}
 	defer rows.Close()
 
-	var deliveries []domain.WebhookDelivery
+	deliveries := []domain.WebhookDelivery{}
 	for rows.Next() {
 		var d domain.WebhookDelivery
 		if err := rows.Scan(&d.ID, &d.WebhookID, &d.MessageID, &d.EventType, &d.Payload, &d.ResponseStatus, &d.ResponseBody, &d.LatencyMs, &d.Attempt, &d.Status, &d.NextRetryAt, &d.CreatedAt); err != nil {
@@ -612,7 +626,7 @@ func (s *DB) ListApiTokens() ([]domain.ApiToken, error) {
 	}
 	defer rows.Close()
 
-	var tokens []domain.ApiToken
+	tokens := []domain.ApiToken{}
 	for rows.Next() {
 		var t domain.ApiToken
 		var scopesJSON string
@@ -681,7 +695,7 @@ func (s *DB) ListOtaReleases() ([]domain.OtaRelease, error) {
 	}
 	defer rows.Close()
 
-	var releases []domain.OtaRelease
+	releases := []domain.OtaRelease{}
 	for rows.Next() {
 		var r domain.OtaRelease
 		var isActive int

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -158,3 +159,50 @@ func TestDeviceAndSimPersistence(t *testing.T) {
 	}
 }
 
+
+func TestEmptyListsEncodeAsArrays(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Close()
+
+	devices, _ := db.ListDevices()
+	webhooks, _ := db.ListWebhooks()
+	tokens, _ := db.ListApiTokens()
+	deliveries, _ := db.ListWebhookDeliveries("", 10)
+	messages, _, _ := db.ListMessages("", "", 10, 0)
+
+	for name, v := range map[string]interface{}{
+		"devices": devices, "webhooks": webhooks, "tokens": tokens,
+		"deliveries": deliveries, "messages": messages,
+	} {
+		b, _ := json.Marshal(v)
+		if string(b) != "[]" {
+			t.Errorf("%s encoded as %s, want []", name, b)
+		}
+	}
+}
+
+func TestReplaceDeviceSimCardsDualSim(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Close()
+
+	dev := domain.Device{ID: "dev_dual", Name: "Phone", TokenHash: "h", Status: "online", CreatedAt: time.Now().UTC()}
+	if err := db.UpsertDevice(&dev); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+
+	// Phones send SIMs without IDs.
+	sims := []domain.SimCard{{SlotIndex: 0, SubID: 1, IsActive: true}, {SlotIndex: 1, SubID: 2, IsActive: true}}
+	if err := db.ReplaceDeviceSimCards(dev.ID, sims); err != nil {
+		t.Fatalf("ReplaceDeviceSimCards: %v", err)
+	}
+	got, _ := db.GetDeviceSimCards(dev.ID)
+	if len(got) != 2 {
+		t.Fatalf("got %d SIMs, want 2", len(got))
+	}
+}

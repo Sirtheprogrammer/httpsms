@@ -6,12 +6,16 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.provider.Telephony
+import android.telephony.SubscriptionManager
 import android.telephony.SmsMessage
 import android.util.Log
 import com.google.gson.Gson
 import com.httpsms.gateway.data.local.AppDatabase
 import com.httpsms.gateway.data.local.OutboxEntity
+import com.httpsms.gateway.core.GatewayConfig
+import com.httpsms.gateway.core.GatewayState
 import com.httpsms.gateway.service.GatewayForegroundService
+import com.httpsms.gateway.service.GatewayWatchdogWorker
 import com.httpsms.gateway.sms.SmsDeduplicator
 import com.httpsms.gateway.sms.SmsManagerHandler
 import kotlinx.coroutines.CoroutineScope
@@ -45,9 +49,7 @@ class SmsBroadcastReceiver : BroadcastReceiver() {
                 }
                 val fullBody = bodyBuilder.toString()
 
-                // Extract SIM slot if available from intent extras
-                val simSlot = intent.getIntExtra("android.telephony.extra.SLOT_INDEX",
-                    intent.getIntExtra("subscription", 0))
+                val simSlot = resolveSimSlot(intent)
 
                 val deduplicator = SmsDeduplicator(context)
                 val (isUnique, fingerprint) = deduplicator.isUniqueAndRecord(
@@ -83,15 +85,15 @@ class SmsBroadcastReceiver : BroadcastReceiver() {
 
                 val db = AppDatabase.getInstance(context)
                 db.outboxDao().insert(outboxEntity)
+                GatewayState.smsReceived()
 
-                // Trigger foreground service to push to Go backend
-                val serviceIntent = Intent(context, GatewayForegroundService::class.java).apply {
-                    action = GatewayForegroundService.ACTION_FLUSH_OUTBOX
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent)
-                } else {
-                    context.startService(serviceIntent)
+                // Hand off to the running service; the outbox row survives if it isn't running
+                // and is flushed on the next connection.
+                val service = GatewayForegroundService.instance
+                if (service != null) {
+                    service.flushOutbox()
+                } else if (GatewayConfig(context).serviceEnabled) {
+                    GatewayForegroundService.start(context, GatewayForegroundService.ACTION_FLUSH_OUTBOX)
                 }
 
             } catch (e: Exception) {
@@ -103,15 +105,28 @@ class SmsBroadcastReceiver : BroadcastReceiver() {
     }
 }
 
+/** Which SIM slot an SMS_RECEIVED broadcast arrived on (0-based). */
+private fun resolveSimSlot(intent: Intent): Int {
+    val slot = intent.getIntExtra("android.telephony.extra.SLOT_INDEX", -1)
+    if (slot >= 0) return slot
+    val subId = intent.getIntExtra(
+        "android.telephony.extra.SUBSCRIPTION_INDEX",
+        intent.getIntExtra("subscription", SubscriptionManager.INVALID_SUBSCRIPTION_ID),
+    )
+    if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val mapped = SubscriptionManager.getSlotIndex(subId)
+        if (mapped >= 0) return mapped
+    }
+    return 0
+}
+
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            val serviceIntent = Intent(context, GatewayForegroundService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
-            }
+        // Boot and app-update broadcasts are exempt from background start limits.
+        val config = GatewayConfig(context)
+        if (config.serviceEnabled && config.isPaired) {
+            GatewayForegroundService.start(context)
+            GatewayWatchdogWorker.schedule(context)
         }
     }
 }
@@ -144,14 +159,16 @@ class SmsStatusReceiver : BroadcastReceiver() {
 
         Log.i(TAG, "Message $messageId status updated: $status")
 
-        // Notify Gateway Foreground Service to sync status with server
-        val serviceIntent = Intent(context, GatewayForegroundService::class.java).apply {
-            this.action = GatewayForegroundService.ACTION_SYNC_STATUS
-            putExtra("message_id", messageId)
-            putExtra("status", status)
-            putExtra("error_message", errorMessage)
+        val service = GatewayForegroundService.instance
+        if (service != null) {
+            service.reportMessageStatus(messageId, status, errorMessage)
+        } else {
+            val extras = Intent()
+                .putExtra("message_id", messageId)
+                .putExtra("status", status)
+                .putExtra("error_message", errorMessage)
+            GatewayForegroundService.start(context, GatewayForegroundService.ACTION_SYNC_STATUS, extras)
         }
-        context.startService(serviceIntent)
     }
 }
 

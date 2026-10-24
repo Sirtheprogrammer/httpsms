@@ -96,13 +96,18 @@ func (h *Hub) Run() {
 
 		case dev := <-h.unregisterDevice:
 			h.mu.Lock()
+			removed := false
 			if curr, ok := h.devices[dev.DeviceID]; ok && curr == dev {
 				delete(h.devices, dev.DeviceID)
 				close(dev.SendChan)
+				removed = true
 			}
 			h.mu.Unlock()
-			log.Printf("[WebSocket] Android device disconnected: %s", dev.DeviceID)
-			h.broadcastDeviceStatus(dev.DeviceID, "offline")
+			// A superseded connection (phone reconnected) must not mark the device offline.
+			if removed {
+				log.Printf("[WebSocket] Android device disconnected: %s", dev.DeviceID)
+				h.broadcastDeviceStatus(dev.DeviceID, "offline")
+			}
 
 		case dash := <-h.registerDash:
 			h.mu.Lock()
@@ -199,14 +204,29 @@ func (h *Hub) SendSmsCommand(msg *domain.Message) error {
 	}
 
 	frameBytes, _ := json.Marshal(frame)
-	select {
-	case devConn.SendChan <- frameBytes:
-		// Message dispatched to device
-		_ = h.store.UpdateMessageStatus(msg.ID, domain.MessageStatusDispatched, "", nil, nil)
-		h.BroadcastToDashboards("message.dispatched", msg)
-		return nil
-	default:
+	if !devConn.trySend(frameBytes) {
 		return ErrDeviceBusy
+	}
+	_ = h.store.UpdateMessageStatus(msg.ID, domain.MessageStatusDispatched, "", nil, nil)
+	msg.Status = domain.MessageStatusDispatched
+	h.BroadcastToDashboards("message.dispatched", msg)
+	return nil
+}
+
+// trySend queues a frame without blocking. The hub closes SendChan when a
+// connection is replaced or dropped, so a send can race with that close;
+// treat it as a failed send instead of crashing the server.
+func (c *DeviceConn) trySend(frame []byte) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	select {
+	case c.SendChan <- frame:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -362,7 +382,12 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 				_ = c.Hub.store.UpsertDevice(dev)
 
 				if len(payload.SimCards) > 0 {
-					_ = c.Hub.store.ReplaceDeviceSimCards(c.DeviceID, payload.SimCards)
+					if err := c.Hub.store.ReplaceDeviceSimCards(c.DeviceID, payload.SimCards); err != nil {
+						log.Printf("[WebSocket] Failed to store SIM cards for %s: %v", c.DeviceID, err)
+					}
+					if fresh, _ := c.Hub.store.GetDevice(c.DeviceID); fresh != nil {
+						dev = fresh
+					}
 				}
 				c.Hub.BroadcastToDashboards("device.heartbeat", dev)
 			}
@@ -402,7 +427,7 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 					Action:         "ack",
 					IdempotencyKey: payload.IdempotencyKey,
 				})
-				c.SendChan <- ackFrame
+				c.trySend(ackFrame)
 
 				// ONLY dispatch webhooks and dashboard event if it's NOT a duplicate!
 				if isNew {

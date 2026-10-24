@@ -69,6 +69,10 @@
           </div>
           <span class="latency-metric" id="conn-latency">--</span>
         </div>
+        <button class="btn btn-secondary btn-sm sidebar-settings" id="btn-open-settings">
+          <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+        </button>
       </div>
     </aside>
 
@@ -385,25 +389,47 @@
           <button class="drawer-close" id="btn-close-pair-modal">&times;</button>
         </div>
         <div class="modal-body">
-          <p style="color:var(--text-secondary); margin-bottom:16px; font-size:13px;">
-            Open the HttpSMS Gateway app on your Android device and point the scanner at this QR code to establish secure pairing.
-          </p>
+          <ol class="pair-steps">
+            <li>Open <strong>HttpSMS Gateway</strong> on the phone and tap <strong>Scan pairing QR</strong>.</li>
+            <li>Point the camera at the code below.</li>
+            <li>The phone connects and this window confirms it.</li>
+          </ol>
+
+          <div class="form-group">
+            <label class="form-label" for="pair-server-input">Server address the phone will use</label>
+            <input type="url" id="pair-server-input" class="form-control mono" spellcheck="false">
+            <div class="form-hint" id="pair-server-hint">Use an address the phone can reach, e.g. your computer's LAN IP.</div>
+          </div>
 
           <div class="qr-container">
-            <canvas id="pair-qr-canvas" class="qr-canvas" width="200" height="200"></canvas>
+            <canvas id="pair-qr-canvas" class="qr-canvas" width="240" height="240"></canvas>
           </div>
 
-          <div class="drawer-field-group">
-            <div class="drawer-field-label">Gateway Server URL</div>
-            <div class="drawer-field-value mono text-muted" id="pair-server-text">--</div>
+          <div class="pair-status" id="pair-status">
+            <span class="pulse-dot waiting"></span>
+            <span id="pair-status-text">Generating pairing code…</span>
           </div>
-          <div class="drawer-field-group">
-            <div class="drawer-field-label">Manual Pairing Secret Token</div>
-            <div class="drawer-field-value mono text-muted" style="font-size:11.5px;" id="pair-token-text">--</div>
-          </div>
+
+          <details class="pair-manual">
+            <summary>Can't scan? Enter it manually</summary>
+            <div class="drawer-field-group">
+              <div class="drawer-field-label">Server URL</div>
+              <div class="copy-row">
+                <code class="mono" id="pair-server-text">--</code>
+                <button class="btn btn-secondary btn-sm" data-copy-target="pair-server-text">Copy</button>
+              </div>
+            </div>
+            <div class="drawer-field-group">
+              <div class="drawer-field-label">Device token</div>
+              <div class="copy-row">
+                <code class="mono" id="pair-token-text">--</code>
+                <button class="btn btn-secondary btn-sm" data-copy-target="pair-token-text">Copy</button>
+              </div>
+            </div>
+          </details>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="document.getElementById('pair-modal').classList.remove('open')">Close</button>
+          <button class="btn btn-secondary" data-close-modal="pair-modal">Close</button>
         </div>
       </div>
     </div>
@@ -451,7 +477,7 @@
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="document.getElementById('webhook-modal').classList.remove('open')">Cancel</button>
+          <button class="btn btn-secondary" data-close-modal="webhook-modal">Cancel</button>
           <button class="btn btn-primary" id="btn-save-webhook">Register Webhook</button>
         </div>
       </div>
@@ -496,8 +522,50 @@
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="document.getElementById('token-modal').classList.remove('open')">Cancel</button>
+          <button class="btn btn-secondary" data-close-modal="token-modal">Cancel</button>
           <button class="btn btn-primary" id="btn-save-token">Generate Key</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Newly generated API token (shown once) -->
+    <div class="modal-overlay" id="token-result-modal">
+      <div class="modal-window">
+        <div class="modal-header">
+          <span style="font-weight:600;">API token created</span>
+          <button class="drawer-close" data-close-modal="token-result-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="callout callout-warning">Copy this token now. It is stored hashed and won't be shown again.</p>
+          <div class="copy-row">
+            <code class="mono" id="token-result-text">--</code>
+            <button class="btn btn-primary btn-sm" data-copy-target="token-result-text">Copy</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-close-modal="token-result-modal">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Dashboard settings -->
+    <div class="modal-overlay" id="settings-modal">
+      <div class="modal-window">
+        <div class="modal-header">
+          <span style="font-weight:600;">Dashboard settings</span>
+          <button class="drawer-close" data-close-modal="settings-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="callout" id="settings-auth-notice" style="display:none;">The server rejected the saved admin token. Enter the server's <code class="mono">MASTER_SECRET</code> to continue.</p>
+          <div class="form-group">
+            <label class="form-label" for="settings-token-input">Admin token (server MASTER_SECRET)</label>
+            <input type="password" id="settings-token-input" class="form-control mono" autocomplete="off" spellcheck="false">
+            <div class="form-hint">Stored only in this browser.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-close-modal="settings-modal">Cancel</button>
+          <button class="btn btn-primary" id="btn-save-settings">Save &amp; reload data</button>
         </div>
       </div>
     </div>
@@ -506,6 +574,7 @@
     <div id="toast-container" style="position:fixed; bottom:24px; right:24px; z-index:200;"></div>
   </div>
 
+  <script src="/js/vendor/qrcode.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>
