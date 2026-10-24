@@ -29,6 +29,9 @@ The easiest way to run HttpSMS Gateway is via Docker Compose:
 git clone https://github.com/Sirtheprogrammer/httpsms.git
 cd httpsms
 
+# Optional: set SECRET_KEY / MASTER_SECRET (see .env.example)
+cp .env.example .env
+
 # Launch the server in detached mode
 docker compose up -d
 ```

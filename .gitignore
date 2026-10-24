@@ -1,2 +1,6 @@
-data/secret.key
+# Runtime data: SQLite database, OTA uploads and the encryption key for users' AI keys
+data/
 server/data/
+
+# Local environment
+.env
