@@ -6,9 +6,9 @@ services:
     container_name: httpsms-gateway
     restart: unless-stopped
     ports:
-      - "${PORT:-8080}:${PORT:-8080}"
+      - "8092:8092"
     environment:
-      - PORT={PORT:-8080}
+      - PORT=8092
       - DB_PATH=/app/data/httpsms.db
       - OTA_DIR=/app/data/ota
       - WEB_DIR=/app/web
