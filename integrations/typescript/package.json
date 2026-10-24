@@ -1,0 +1,24 @@
+{
+  "name": "@httpsms/sdk",
+  "version": "1.0.0",
+  "description": "Official TypeScript and Node.js SDK for HttpSMS Gateway",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [
+    "sms",
+    "gateway",
+    "telecom",
+    "android",
+    "mcp",
+    "agent"
+  ],
+  "author": "HttpSMS Authors",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

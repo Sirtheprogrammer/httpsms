@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "httpsms"
+version = "1.0.0"
+description = "Official Python client library for the HttpSMS Gateway."
+readme = "README.md"
+authors = [{ name = "HttpSMS Authors" }]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+keywords = ["sms", "gateway", "android", "telecom", "mcp", "agent"]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/httpsms/gateway"
+Repository = "https://github.com/httpsms/gateway.git"

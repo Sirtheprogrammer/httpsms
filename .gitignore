@@ -4,3 +4,15 @@ server/data/
 
 # Local environment
 .env
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Node & TypeScript
+node_modules/
+dist/
+
+# Android build outputs & local config
+.gradle/
+local.properties

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "httpsms-gateway": {
+      "command": "/home/leeh/Desktop/httpsms/server/bin/httpsms-mcp",
+      "env": {
+        "HTTPSMS_BASE_URL": "http://localhost:8080",
+        "HTTPSMS_API_KEY": "htsms_live_mcp_test_token_20261024_secret"
+      }
+    }
+  }
+}
