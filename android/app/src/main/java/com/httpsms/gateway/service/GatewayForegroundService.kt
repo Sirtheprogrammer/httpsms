@@ -242,6 +242,7 @@ class GatewayForegroundService : Service() {
             .setContentTitle("HttpSMS Gateway")
             .setContentText(statusText)
             .setSmallIcon(com.httpsms.gateway.R.drawable.ic_stat_gateway)
+            .setColor(ContextCompat.getColor(this, com.httpsms.gateway.R.color.brand_dark))
             .setContentIntent(openApp)
             .addAction(0, "Stop", stop)
             .setOngoing(true)

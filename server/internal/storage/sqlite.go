@@ -14,6 +14,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// DB wraps SQLite. Methods that take an `owner` argument scope results to that
+// user's rows; an empty owner means "all users" and is only passed for admins.
 type DB struct {
 	db *sql.DB
 	mu sync.RWMutex
@@ -150,6 +152,61 @@ func (s *DB) migrate() error {
 		created_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+		name TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL DEFAULT 'user',
+		password_hash TEXT NOT NULL,
+		disabled INTEGER NOT NULL DEFAULT 0,
+		last_login_at DATETIME,
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		token_hash TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		created_at DATETIME NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+	);
+
+	CREATE TABLE IF NOT EXISTS ai_credentials (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		label TEXT NOT NULL DEFAULT '',
+		base_url TEXT NOT NULL DEFAULT '',
+		key_hint TEXT NOT NULL DEFAULT '',
+		encrypted_key BLOB NOT NULL,
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS workflows (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 0,
+		graph TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS workflow_runs (
+		id TEXT PRIMARY KEY,
+		workflow_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		trigger_message_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL,
+		dry_run INTEGER NOT NULL DEFAULT 0,
+		steps TEXT NOT NULL DEFAULT '[]',
+		error TEXT NOT NULL DEFAULT '',
+		started_at DATETIME NOT NULL,
+		finished_at DATETIME,
+		FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(idempotency_key);
 	CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
@@ -157,19 +214,86 @@ func (s *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_sim_cards_device ON sim_cards(device_id);
 	CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id);
 	CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
+	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+	CREATE INDEX IF NOT EXISTS idx_workflows_user ON workflows(user_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id, started_at DESC);
 	`
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Multi-user upgrade: ownership columns on pre-existing tables.
+	for _, table := range []string{"devices", "messages", "webhooks", "api_tokens"} {
+		if err := s.addColumnIfMissing(table, "user_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(user_id, sender, recipient);
+	CREATE INDEX IF NOT EXISTS idx_webhooks_user ON webhooks(user_id);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+	`)
 	return err
 }
 
+func (s *DB) addColumnIfMissing(table, column, definition string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	rows.Close()
+	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
+	return err
+}
+
+// ownerClause returns a SQL fragment and args restricting `col` to owner, or nothing for admins.
+func ownerClause(col, owner string) (string, []interface{}) {
+	if owner == "" {
+		return "", nil
+	}
+	return col + " = ?", []interface{}{owner}
+}
+
 // Device operations
+
+const deviceColumns = `id, user_id, name, token_hash, status, battery_level, is_charging, app_version, app_version_code, last_seen_at, created_at`
+
+func scanDevice(sc interface{ Scan(...interface{}) error }) (*domain.Device, error) {
+	var d domain.Device
+	var isCharging int
+	var lastSeen sql.NullTime
+	if err := sc.Scan(&d.ID, &d.UserID, &d.Name, &d.TokenHash, &d.Status, &d.BatteryLevel, &isCharging, &d.AppVersion, &d.AppVersionCode, &lastSeen, &d.CreatedAt); err != nil {
+		return nil, err
+	}
+	d.IsCharging = isCharging == 1
+	if lastSeen.Valid {
+		d.LastSeenAt = lastSeen.Time
+	}
+	return &d, nil
+}
+
 func (s *DB) UpsertDevice(d *domain.Device) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	query := `
-	INSERT INTO devices (id, name, token_hash, status, battery_level, is_charging, app_version, app_version_code, last_seen_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO devices (id, user_id, name, token_hash, status, battery_level, is_charging, app_version, app_version_code, last_seen_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		status = excluded.status,
@@ -183,68 +307,51 @@ func (s *DB) UpsertDevice(d *domain.Device) error {
 	if d.IsCharging {
 		isCharging = 1
 	}
+	var lastSeen interface{}
+	if !d.LastSeenAt.IsZero() {
+		lastSeen = d.LastSeenAt
+	}
 
-	_, err := s.db.Exec(query, d.ID, d.Name, d.TokenHash, d.Status, d.BatteryLevel, isCharging, d.AppVersion, d.AppVersionCode, d.LastSeenAt, d.CreatedAt)
+	_, err := s.db.Exec(query, d.ID, d.UserID, d.Name, d.TokenHash, d.Status, d.BatteryLevel, isCharging, d.AppVersion, d.AppVersionCode, lastSeen, d.CreatedAt)
 	return err
 }
 
-func (s *DB) GetDevice(id string) (*domain.Device, error) {
+func (s *DB) getDeviceWhere(where string, arg interface{}) (*domain.Device, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, name, token_hash, status, battery_level, is_charging, app_version, app_version_code, last_seen_at, created_at FROM devices WHERE id = ?`
-	row := s.db.QueryRow(query, id)
-
-	var d domain.Device
-	var isCharging int
-	err := row.Scan(&d.ID, &d.Name, &d.TokenHash, &d.Status, &d.BatteryLevel, &isCharging, &d.AppVersion, &d.AppVersionCode, &d.LastSeenAt, &d.CreatedAt)
+	d, err := scanDevice(s.db.QueryRow(`SELECT `+deviceColumns+` FROM devices WHERE `+where, arg))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	d.IsCharging = isCharging == 1
-
-	// Fetch SIM cards
-	sims, err := s.GetDeviceSimCards(d.ID)
-	if err == nil {
+	if sims, err := s.GetDeviceSimCards(d.ID); err == nil {
 		d.SimCards = sims
 	}
+	return d, nil
+}
 
-	return &d, nil
+func (s *DB) GetDevice(id string) (*domain.Device, error) {
+	return s.getDeviceWhere("id = ?", id)
 }
 
 func (s *DB) GetDeviceByTokenHash(tokenHash string) (*domain.Device, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	query := `SELECT id, name, token_hash, status, battery_level, is_charging, app_version, app_version_code, last_seen_at, created_at FROM devices WHERE token_hash = ?`
-	row := s.db.QueryRow(query, tokenHash)
-
-	var d domain.Device
-	var isCharging int
-	err := row.Scan(&d.ID, &d.Name, &d.TokenHash, &d.Status, &d.BatteryLevel, &isCharging, &d.AppVersion, &d.AppVersionCode, &d.LastSeenAt, &d.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	d.IsCharging = isCharging == 1
-	sims, err := s.GetDeviceSimCards(d.ID)
-	if err == nil {
-		d.SimCards = sims
-	}
-	return &d, nil
+	return s.getDeviceWhere("token_hash = ?", tokenHash)
 }
 
-func (s *DB) ListDevices() ([]domain.Device, error) {
+func (s *DB) ListDevices(owner string) ([]domain.Device, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, name, token_hash, status, battery_level, is_charging, app_version, app_version_code, last_seen_at, created_at FROM devices ORDER BY last_seen_at DESC`
-	rows, err := s.db.Query(query)
+	where, args := ownerClause("user_id", owner)
+	query := `SELECT ` + deviceColumns + ` FROM devices`
+	if where != "" {
+		query += " WHERE " + where
+	}
+	query += ` ORDER BY last_seen_at DESC, created_at DESC`
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -252,17 +359,17 @@ func (s *DB) ListDevices() ([]domain.Device, error) {
 
 	devices := []domain.Device{}
 	for rows.Next() {
-		var d domain.Device
-		var isCharging int
-		if err := rows.Scan(&d.ID, &d.Name, &d.TokenHash, &d.Status, &d.BatteryLevel, &isCharging, &d.AppVersion, &d.AppVersionCode, &d.LastSeenAt, &d.CreatedAt); err != nil {
+		d, err := scanDevice(rows)
+		if err != nil {
 			return nil, err
 		}
-		d.IsCharging = isCharging == 1
-		sims, err := s.GetDeviceSimCards(d.ID)
-		if err == nil {
-			d.SimCards = sims
+		devices = append(devices, *d)
+	}
+	rows.Close()
+	for i := range devices {
+		if sims, err := s.GetDeviceSimCards(devices[i].ID); err == nil {
+			devices[i].SimCards = sims
 		}
-		devices = append(devices, d)
 	}
 	return devices, nil
 }
@@ -273,6 +380,13 @@ func (s *DB) MarkAllDevicesOffline() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("UPDATE devices SET status = 'offline'")
+	return err
+}
+
+func (s *DB) RenameDevice(id, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE devices SET name = ? WHERE id = ?", name, id)
 	return err
 }
 
@@ -344,6 +458,18 @@ func (s *DB) GetDeviceSimCards(deviceID string) ([]domain.SimCard, error) {
 }
 
 // Message operations with exact deduplication
+
+const messageColumns = `id, user_id, direction, device_id, sim_card_id, sim_slot, sender, recipient, body, status, idempotency_key, parts_count, error_message, scheduled_at, sent_at, delivered_at, created_at`
+
+func scanMessage(sc interface{ Scan(...interface{}) error }) (*domain.Message, error) {
+	var m domain.Message
+	err := sc.Scan(&m.ID, &m.UserID, &m.Direction, &m.DeviceID, &m.SimCardID, &m.SimSlot, &m.Sender, &m.Recipient, &m.Body, &m.Status, &m.IdempotencyKey, &m.PartsCount, &m.ErrorMessage, &m.ScheduledAt, &m.SentAt, &m.DeliveredAt, &m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 func (s *DB) SaveMessage(m *domain.Message) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -353,21 +479,24 @@ func (s *DB) SaveMessage(m *domain.Message) (bool, error) {
 		var existingID string
 		err := s.db.QueryRow("SELECT id FROM messages WHERE idempotency_key = ?", m.IdempotencyKey).Scan(&existingID)
 		if err == nil {
-			// Found duplicate!
 			m.ID = existingID
 			return false, nil // false indicates already existed / was duplicate
 		}
 	}
 
-	query := `
-	INSERT INTO messages (id, direction, device_id, sim_card_id, sim_slot, sender, recipient, body, status, idempotency_key, parts_count, error_message, scheduled_at, sent_at, delivered_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	_, err := s.db.Exec(query, m.ID, m.Direction, m.DeviceID, m.SimCardID, m.SimSlot, m.Sender, m.Recipient, m.Body, m.Status, m.IdempotencyKey, m.PartsCount, m.ErrorMessage, m.ScheduledAt, m.SentAt, m.DeliveredAt, m.CreatedAt)
+	query := `INSERT INTO messages (` + messageColumns + `) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, m.ID, m.UserID, m.Direction, m.DeviceID, m.SimCardID, m.SimSlot, m.Sender, m.Recipient, m.Body, m.Status, m.IdempotencyKey, m.PartsCount, m.ErrorMessage, m.ScheduledAt, m.SentAt, m.DeliveredAt, m.CreatedAt)
 	if err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *DB) SetMessageDevice(id, deviceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE messages SET device_id = ? WHERE id = ?`, deviceID, id)
+	return err
 }
 
 func (s *DB) UpdateMessageStatus(id, status, errorMsg string, sentAt, deliveredAt *time.Time) error {
@@ -383,33 +512,46 @@ func (s *DB) GetMessage(id string) (*domain.Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, direction, device_id, sim_card_id, sim_slot, sender, recipient, body, status, idempotency_key, parts_count, error_message, scheduled_at, sent_at, delivered_at, created_at FROM messages WHERE id = ?`
-	row := s.db.QueryRow(query, id)
-
-	var m domain.Message
-	err := row.Scan(&m.ID, &m.Direction, &m.DeviceID, &m.SimCardID, &m.SimSlot, &m.Sender, &m.Recipient, &m.Body, &m.Status, &m.IdempotencyKey, &m.PartsCount, &m.ErrorMessage, &m.ScheduledAt, &m.SentAt, &m.DeliveredAt, &m.CreatedAt)
+	m, err := scanMessage(s.db.QueryRow(`SELECT `+messageColumns+` FROM messages WHERE id = ?`, id))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &m, err
+	return m, err
 }
 
-func (s *DB) ListMessages(direction, search string, limit, offset int) ([]domain.Message, int, error) {
+// MessageFilter narrows ListMessages; zero values mean "any".
+type MessageFilter struct {
+	Owner     string
+	Direction string
+	Search    string
+	Contact   string // messages exchanged with this phone number
+	Limit     int
+	Offset    int
+}
+
+func (s *DB) ListMessages(f MessageFilter) ([]domain.Message, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var whereClauses []string
 	var args []interface{}
 
-	if direction != "" {
-		whereClauses = append(whereClauses, "direction = ?")
-		args = append(args, direction)
+	if clause, a := ownerClause("user_id", f.Owner); clause != "" {
+		whereClauses = append(whereClauses, clause)
+		args = append(args, a...)
 	}
-
-	if search != "" {
-		searchPattern := "%" + search + "%"
-		whereClauses = append(whereClauses, "(sender LIKE ? OR recipient LIKE ? OR body LIKE ?)")
-		args = append(args, searchPattern, searchPattern, searchPattern)
+	if f.Direction != "" {
+		whereClauses = append(whereClauses, "direction = ?")
+		args = append(args, f.Direction)
+	}
+	if f.Contact != "" {
+		whereClauses = append(whereClauses, "(sender = ? OR recipient = ?)")
+		args = append(args, f.Contact, f.Contact)
+	}
+	if f.Search != "" {
+		searchPattern := "%" + f.Search + "%"
+		whereClauses = append(whereClauses, "(sender LIKE ? OR recipient LIKE ? OR body LIKE ? OR id = ?)")
+		args = append(args, searchPattern, searchPattern, searchPattern, f.Search)
 	}
 
 	whereSQL := ""
@@ -417,18 +559,16 @@ func (s *DB) ListMessages(direction, search string, limit, offset int) ([]domain
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	// Count total
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM messages %s", whereSQL)
 	var total int
-	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM messages %s", whereSQL), args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	// Select rows
-	listQuery := fmt.Sprintf(`SELECT id, direction, device_id, sim_card_id, sim_slot, sender, recipient, body, status, idempotency_key, parts_count, error_message, scheduled_at, sent_at, delivered_at, created_at FROM messages %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, whereSQL)
-	queryArgs := append(args, limit, offset)
-
-	rows, err := s.db.Query(listQuery, queryArgs...)
+	if f.Limit <= 0 {
+		f.Limit = 30
+	}
+	listQuery := fmt.Sprintf(`SELECT %s FROM messages %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, messageColumns, whereSQL)
+	rows, err := s.db.Query(listQuery, append(args, f.Limit, f.Offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -436,16 +576,62 @@ func (s *DB) ListMessages(direction, search string, limit, offset int) ([]domain
 
 	messages := []domain.Message{}
 	for rows.Next() {
-		var m domain.Message
-		if err := rows.Scan(&m.ID, &m.Direction, &m.DeviceID, &m.SimCardID, &m.SimSlot, &m.Sender, &m.Recipient, &m.Body, &m.Status, &m.IdempotencyKey, &m.PartsCount, &m.ErrorMessage, &m.ScheduledAt, &m.SentAt, &m.DeliveredAt, &m.CreatedAt); err != nil {
+		m, err := scanMessage(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		messages = append(messages, m)
+		messages = append(messages, *m)
 	}
 	return messages, total, nil
 }
 
+// MessageStats are the dashboard overview counters.
+type MessageStats struct {
+	Inbound      int `json:"total_inbound"`
+	Outbound     int `json:"total_outbound"`
+	Failed       int `json:"total_failed"`
+	InboundToday int `json:"inbound_24h"`
+	SentToday    int `json:"outbound_24h"`
+}
+
+func (s *DB) GetMessageStats(owner string) (MessageStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	where, args := ownerClause("user_id", owner)
+	if where == "" {
+		where = "1=1"
+	}
+	since := time.Now().UTC().Add(-24 * time.Hour)
+	var st MessageStats
+	err := s.db.QueryRow(`SELECT
+		COALESCE(SUM(direction = 'inbound'), 0),
+		COALESCE(SUM(direction = 'outbound'), 0),
+		COALESCE(SUM(status = 'failed'), 0),
+		COALESCE(SUM(direction = 'inbound' AND created_at >= ?), 0),
+		COALESCE(SUM(direction = 'outbound' AND created_at >= ?), 0)
+		FROM messages WHERE `+where, append([]interface{}{since, since}, args...)...).
+		Scan(&st.Inbound, &st.Outbound, &st.Failed, &st.InboundToday, &st.SentToday)
+	return st, err
+}
+
 // Webhook operations
+
+func scanWebhook(sc interface{ Scan(...interface{}) error }) (*domain.Webhook, error) {
+	var w domain.Webhook
+	var eventsJSON string
+	var isActive int
+	if err := sc.Scan(&w.ID, &w.UserID, &w.URL, &w.Secret, &eventsJSON, &isActive, &w.CreatedAt); err != nil {
+		return nil, err
+	}
+	w.IsActive = isActive == 1
+	_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
+	if w.Events == nil {
+		w.Events = []string{}
+	}
+	return &w, nil
+}
+
 func (s *DB) CreateWebhook(w *domain.Webhook) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -456,34 +642,22 @@ func (s *DB) CreateWebhook(w *domain.Webhook) error {
 		isActive = 1
 	}
 
-	query := `INSERT INTO webhooks (id, url, secret, events, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, w.ID, w.URL, w.Secret, string(eventsJSON), isActive, w.CreatedAt)
+	query := `INSERT INTO webhooks (id, user_id, url, secret, events, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, w.ID, w.UserID, w.URL, w.Secret, string(eventsJSON), isActive, w.CreatedAt)
 	return err
 }
 
-func (s *DB) ListActiveWebhooksForEvent(eventType string) ([]domain.Webhook, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	query := `SELECT id, url, secret, events, is_active, created_at FROM webhooks WHERE is_active = 1`
-	rows, err := s.db.Query(query)
+// ListActiveWebhooksForEvent returns the owner's active webhooks subscribed to eventType.
+func (s *DB) ListActiveWebhooksForEvent(owner, eventType string) ([]domain.Webhook, error) {
+	all, err := s.ListWebhooks(owner)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	webhooks := []domain.Webhook{}
-	for rows.Next() {
-		var w domain.Webhook
-		var eventsJSON string
-		var isActive int
-		if err := rows.Scan(&w.ID, &w.URL, &w.Secret, &eventsJSON, &isActive, &w.CreatedAt); err != nil {
-			return nil, err
+	for _, w := range all {
+		if !w.IsActive {
+			continue
 		}
-		w.IsActive = isActive == 1
-		_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
-
-		// Check if event is subscribed
 		for _, e := range w.Events {
 			if e == eventType || e == "*" {
 				webhooks = append(webhooks, w)
@@ -494,12 +668,16 @@ func (s *DB) ListActiveWebhooksForEvent(eventType string) ([]domain.Webhook, err
 	return webhooks, nil
 }
 
-func (s *DB) ListWebhooks() ([]domain.Webhook, error) {
+func (s *DB) ListWebhooks(owner string) ([]domain.Webhook, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, url, secret, events, is_active, created_at FROM webhooks ORDER BY created_at DESC`
-	rows, err := s.db.Query(query)
+	where, args := ownerClause("user_id", owner)
+	query := `SELECT id, user_id, url, secret, events, is_active, created_at FROM webhooks`
+	if where != "" {
+		query += " WHERE " + where
+	}
+	rows, err := s.db.Query(query+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -507,17 +685,23 @@ func (s *DB) ListWebhooks() ([]domain.Webhook, error) {
 
 	webhooks := []domain.Webhook{}
 	for rows.Next() {
-		var w domain.Webhook
-		var eventsJSON string
-		var isActive int
-		if err := rows.Scan(&w.ID, &w.URL, &w.Secret, &eventsJSON, &isActive, &w.CreatedAt); err != nil {
+		w, err := scanWebhook(rows)
+		if err != nil {
 			return nil, err
 		}
-		w.IsActive = isActive == 1
-		_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
-		webhooks = append(webhooks, w)
+		webhooks = append(webhooks, *w)
 	}
 	return webhooks, nil
+}
+
+func (s *DB) GetWebhook(id string) (*domain.Webhook, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	w, err := scanWebhook(s.db.QueryRow(`SELECT id, user_id, url, secret, events, is_active, created_at FROM webhooks WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return w, err
 }
 
 func (s *DB) DeleteWebhook(id string) error {
@@ -547,17 +731,23 @@ func (s *DB) SaveWebhookDelivery(d *domain.WebhookDelivery) error {
 	return err
 }
 
-func (s *DB) ListWebhookDeliveries(webhookID string, limit int) ([]domain.WebhookDelivery, error) {
+// ListWebhookDeliveries returns recent deliveries for the owner's webhooks (all for admins).
+func (s *DB) ListWebhookDeliveries(owner, webhookID string, limit int) ([]domain.WebhookDelivery, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, webhook_id, message_id, event_type, payload, response_status, response_body, latency_ms, attempt, status, next_retry_at, created_at FROM webhook_deliveries `
+	query := `SELECT d.id, d.webhook_id, d.message_id, d.event_type, d.payload, d.response_status, d.response_body, d.latency_ms, d.attempt, d.status, d.next_retry_at, d.created_at
+		FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id WHERE 1=1 `
 	var args []interface{}
+	if owner != "" {
+		query += `AND w.user_id = ? `
+		args = append(args, owner)
+	}
 	if webhookID != "" {
-		query += `WHERE webhook_id = ? `
+		query += `AND d.webhook_id = ? `
 		args = append(args, webhookID)
 	}
-	query += `ORDER BY created_at DESC LIMIT ?`
+	query += `ORDER BY d.created_at DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.db.Query(query, args...)
@@ -578,13 +768,29 @@ func (s *DB) ListWebhookDeliveries(webhookID string, limit int) ([]domain.Webhoo
 }
 
 // ApiToken operations
+
+const tokenColumns = `id, user_id, name, token_prefix, token_hash, scopes, last_used_at, expires_at, created_at`
+
+func scanToken(sc interface{ Scan(...interface{}) error }) (*domain.ApiToken, error) {
+	var t domain.ApiToken
+	var scopesJSON string
+	if err := sc.Scan(&t.ID, &t.UserID, &t.Name, &t.TokenPrefix, &t.TokenHash, &scopesJSON, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(scopesJSON), &t.Scopes)
+	if t.Scopes == nil {
+		t.Scopes = []string{}
+	}
+	return &t, nil
+}
+
 func (s *DB) CreateApiToken(t *domain.ApiToken) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	scopesJSON, _ := json.Marshal(t.Scopes)
-	query := `INSERT INTO api_tokens (id, name, token_prefix, token_hash, scopes, last_used_at, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, t.ID, t.Name, t.TokenPrefix, t.TokenHash, string(scopesJSON), t.LastUsedAt, t.ExpiresAt, t.CreatedAt)
+	query := `INSERT INTO api_tokens (` + tokenColumns + `) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, t.ID, t.UserID, t.Name, t.TokenPrefix, t.TokenHash, string(scopesJSON), t.LastUsedAt, t.ExpiresAt, t.CreatedAt)
 	return err
 }
 
@@ -592,20 +798,22 @@ func (s *DB) GetApiTokenByHash(tokenHash string) (*domain.ApiToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, name, token_prefix, token_hash, scopes, last_used_at, expires_at, created_at FROM api_tokens WHERE token_hash = ?`
-	row := s.db.QueryRow(query, tokenHash)
-
-	var t domain.ApiToken
-	var scopesJSON string
-	err := row.Scan(&t.ID, &t.Name, &t.TokenPrefix, &t.TokenHash, &scopesJSON, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt)
+	t, err := scanToken(s.db.QueryRow(`SELECT `+tokenColumns+` FROM api_tokens WHERE token_hash = ?`, tokenHash))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
+	return t, err
+}
+
+func (s *DB) GetApiToken(id string) (*domain.ApiToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	t, err := scanToken(s.db.QueryRow(`SELECT `+tokenColumns+` FROM api_tokens WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	_ = json.Unmarshal([]byte(scopesJSON), &t.Scopes)
-	return &t, nil
+	return t, err
 }
 
 func (s *DB) TouchApiToken(id string) error {
@@ -615,12 +823,16 @@ func (s *DB) TouchApiToken(id string) error {
 	return err
 }
 
-func (s *DB) ListApiTokens() ([]domain.ApiToken, error) {
+func (s *DB) ListApiTokens(owner string) ([]domain.ApiToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, name, token_prefix, token_hash, scopes, last_used_at, expires_at, created_at FROM api_tokens ORDER BY created_at DESC`
-	rows, err := s.db.Query(query)
+	where, args := ownerClause("user_id", owner)
+	query := `SELECT ` + tokenColumns + ` FROM api_tokens`
+	if where != "" {
+		query += " WHERE " + where
+	}
+	rows, err := s.db.Query(query+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -628,13 +840,11 @@ func (s *DB) ListApiTokens() ([]domain.ApiToken, error) {
 
 	tokens := []domain.ApiToken{}
 	for rows.Next() {
-		var t domain.ApiToken
-		var scopesJSON string
-		if err := rows.Scan(&t.ID, &t.Name, &t.TokenPrefix, &t.TokenHash, &scopesJSON, &t.LastUsedAt, &t.ExpiresAt, &t.CreatedAt); err != nil {
+		t, err := scanToken(rows)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(scopesJSON), &t.Scopes)
-		tokens = append(tokens, t)
+		tokens = append(tokens, *t)
 	}
 	return tokens, nil
 }
@@ -646,7 +856,7 @@ func (s *DB) DeleteApiToken(id string) error {
 	return err
 }
 
-// OTA Release operations
+// OTA Release operations (global, admin-managed)
 func (s *DB) SaveOtaRelease(r *domain.OtaRelease) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -707,4 +917,3 @@ func (s *DB) ListOtaReleases() ([]domain.OtaRelease, error) {
 	}
 	return releases, nil
 }
-

@@ -51,6 +51,7 @@ func TestWebhookDeliveryWithHMAC(t *testing.T) {
 
 	wh := domain.Webhook{
 		ID:        uuid.New().String(),
+		UserID:    "user_1",
 		URL:       mockServer.URL,
 		Secret:    secretKey,
 		Events:    []string{domain.EventSMSReceived},
@@ -63,7 +64,7 @@ func TestWebhookDeliveryWithHMAC(t *testing.T) {
 
 	// Dispatch an event
 	msgID := "msg_test_999"
-	err = dispatcher.Dispatch(domain.EventSMSReceived, &msgID, map[string]string{
+	err = dispatcher.Dispatch("user_1", domain.EventSMSReceived, &msgID, map[string]string{
 		"sender": "+1987654321",
 		"body":   "Hello Webhook Test",
 	})

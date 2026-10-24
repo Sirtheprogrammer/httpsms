@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,8 +19,10 @@ import (
 	"github.com/httpsms/gateway-server/internal/api/middleware"
 	"github.com/httpsms/gateway-server/internal/api/ws"
 	"github.com/httpsms/gateway-server/internal/domain"
+	"github.com/httpsms/gateway-server/internal/secrets"
 	"github.com/httpsms/gateway-server/internal/storage"
 	"github.com/httpsms/gateway-server/internal/webhook"
+	"github.com/httpsms/gateway-server/internal/workflow"
 )
 
 func getEnv(key, defaultVal string) string {
@@ -29,26 +32,34 @@ func getEnv(key, defaultVal string) string {
 	return defaultVal
 }
 
+// resolveWebDir finds the built dashboard (dashboard/dist), falling back to common layouts.
+func resolveWebDir(configured string) string {
+	candidates := []string{configured, "../dashboard/dist", "./dashboard/dist", "./web"}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+			return dir
+		}
+	}
+	return configured
+}
+
 func main() {
 	port := getEnv("PORT", "8080")
 	dbPath := getEnv("DB_PATH", "./data/httpsms.db")
-	masterSecret := getEnv("MASTER_SECRET", "htsms_admin_secret_change_me")
+	masterSecret := os.Getenv("MASTER_SECRET")
 	otaDir := getEnv("OTA_DIR", "./data/ota")
-	webDir := getEnv("WEB_DIR", "../web")
-
-	// Verify or resolve web directory
-	if _, err := os.Stat(webDir); os.IsNotExist(err) {
-		// Try fallback relative path (e.g. inside docker /app/web)
-		if _, err := os.Stat("./web"); err == nil {
-			webDir = "./web"
-		}
-	}
+	webDir := resolveWebDir(os.Getenv("WEB_DIR"))
 
 	log.Printf("[HttpSMS] Booting Gateway Server on :%s", port)
 	log.Printf("[HttpSMS] Database path: %s", dbPath)
 	log.Printf("[HttpSMS] Web UI directory: %s", webDir)
+	if masterSecret == "htsms_admin_secret_change_me" {
+		log.Printf("[HttpSMS] WARNING: MASTER_SECRET is the public default; anyone can use it as admin. Change or unset it.")
+	}
 
-	// Initialize Storage
 	store, err := storage.NewDB(dbPath)
 	if err != nil {
 		log.Fatalf("Fatal: Database initialization failed: %v", err)
@@ -58,116 +69,155 @@ func main() {
 		log.Printf("[HttpSMS] Warning: could not reset device status: %v", err)
 	}
 
-	// Initialize Webhook Dispatcher
+	// Encrypts users' AI provider keys. Keep SECRET_KEY (or data/secret.key) safe and stable.
+	box, err := secrets.Load(os.Getenv("SECRET_KEY"), filepath.Join(filepath.Dir(dbPath), "secret.key"))
+	if err != nil {
+		log.Fatalf("Fatal: could not load encryption key: %v", err)
+	}
+
 	dispatcher := webhook.NewDispatcher(store)
 	dispatcher.Start(5)
 	defer dispatcher.Stop()
 
-	// Initialize WebSocket Hub
+	authMw := middleware.NewAuthMiddleware(store, masterSecret)
+
 	hub := ws.NewHub(store, dispatcher)
+	engine := workflow.NewEngine(store, box)
+	api := handler.NewAPIHandler(store, hub, dispatcher, engine, box, otaDir)
+	engine.Wire(api, hub)
+	hub.SetAuthenticator(authMw.Resolve)
+	hub.SetInboundHook(engine.HandleInbound)
 	go hub.Run()
 
-	// Initialize Auth Middleware & API Handlers
-	authMw := middleware.NewAuthMiddleware(store, masterSecret)
-	api := handler.NewAPIHandler(store, hub, dispatcher, otaDir)
+	go func() {
+		for range time.Tick(6 * time.Hour) {
+			_ = store.PruneExpiredSessions()
+		}
+	}()
 
-	// Main Router
 	r := chi.NewRouter()
-
-	// Global Middleware
 	r.Use(chimiddleware.RequestID)
 	r.Use(chimiddleware.RealIP)
 	r.Use(chimiddleware.Logger)
 	r.Use(chimiddleware.Recoverer)
-	r.Use(chimiddleware.Timeout(60 * time.Second))
+	// API clients may call from anywhere with a Bearer token, but browsers never get
+	// credentialed cross-origin access, which (with the X-Requested-With check) blocks CSRF.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Device-Token"},
-		ExposedHeaders:   []string{"Link", "X-Signature-SHA256", "X-Checksum-SHA256"},
-		AllowCredentials: true,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Device-Token"},
+		ExposedHeaders:   []string{"X-Signature-SHA256", "X-Checksum-SHA256"},
+		AllowCredentials: false,
 		MaxAge:           300,
 	}))
 
-	// WebSocket Endpoints
+	// WebSockets (no request timeout)
 	r.Get("/ws/device", hub.HandleDeviceWs)
 	r.Get("/ws/dashboard", hub.HandleDashboardWs)
 
-	// Public Health Check
-	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		handler.WriteJSON(w, http.StatusOK, map[string]interface{}{
-			"status":    "operational",
-			"timestamp": time.Now().UTC(),
+	r.Route("/api/v1", func(apiRoute chi.Router) {
+		apiRoute.Use(chimiddleware.Timeout(4 * time.Minute))
+
+		// Public
+		apiRoute.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			handler.WriteJSON(w, http.StatusOK, map[string]interface{}{"status": "operational", "timestamp": time.Now().UTC()})
+		})
+		apiRoute.Get("/ota/check", api.CheckOtaUpdate)
+		apiRoute.Get("/ota/download/{id}", api.DownloadOtaRelease)
+		apiRoute.Get("/auth/status", api.AuthStatus)
+		limiter := middleware.NewRateLimiter(10, time.Minute)
+		apiRoute.With(limiter.Middleware).Post("/auth/register", api.Register)
+		apiRoute.With(limiter.Middleware).Post("/auth/login", api.Login)
+		apiRoute.Post("/auth/logout", api.Logout)
+
+		// Signed-in users and API tokens
+		apiRoute.Group(func(p chi.Router) {
+			p.Use(authMw.Authenticate)
+			scope := authMw.RequireScope
+
+			p.Get("/auth/me", api.Me)
+			p.Patch("/auth/me", api.UpdateMe)
+			p.Post("/auth/password", api.ChangePassword)
+
+			p.With(scope(domain.ScopeSMSSend)).Post("/sms/send", api.SendSMS)
+			p.With(scope(domain.ScopeSMSRead)).Get("/messages", api.ListMessages)
+			p.With(scope(domain.ScopeSMSRead)).Get("/messages/{id}", api.GetMessage)
+			p.With(scope(domain.ScopeSMSRead)).Get("/system/stats", api.GetSystemStats)
+
+			p.With(scope(domain.ScopeDevicesManage)).Get("/devices", api.ListDevices)
+			p.With(scope(domain.ScopeDevicesManage)).Post("/devices/pair", api.PairDevice)
+			p.With(scope(domain.ScopeDevicesManage)).Patch("/devices/{id}", api.UpdateDevice)
+			p.With(scope(domain.ScopeDevicesManage)).Delete("/devices/{id}", api.DeleteDevice)
+
+			p.With(scope(domain.ScopeWebhooksManage)).Get("/webhooks", api.ListWebhooks)
+			p.With(scope(domain.ScopeWebhooksManage)).Post("/webhooks", api.CreateWebhook)
+			p.With(scope(domain.ScopeWebhooksManage)).Get("/webhooks/deliveries", api.ListWebhookDeliveries)
+			p.With(scope(domain.ScopeWebhooksManage)).Delete("/webhooks/{id}", api.DeleteWebhook)
+			p.With(scope(domain.ScopeWebhooksManage)).Post("/webhooks/{id}/test", api.TestWebhook)
+
+			p.With(scope("*")).Get("/tokens", api.ListTokens)
+			p.With(scope("*")).Post("/tokens", api.CreateToken)
+			p.With(scope("*")).Delete("/tokens/{id}", api.DeleteToken)
+
+			p.With(scope(domain.ScopeWorkflows)).Get("/ai/providers", api.ListAIProviders)
+			p.With(scope(domain.ScopeWorkflows)).Get("/ai/credentials", api.ListAICredentials)
+			p.With(scope(domain.ScopeWorkflows)).Post("/ai/credentials", api.CreateAICredential)
+			p.With(scope(domain.ScopeWorkflows)).Get("/ai/credentials/{id}/models", api.ListCredentialModels)
+			p.With(scope(domain.ScopeWorkflows)).Delete("/ai/credentials/{id}", api.DeleteAICredential)
+
+			p.With(scope(domain.ScopeWorkflows)).Get("/workflows", api.ListWorkflows)
+			p.With(scope(domain.ScopeWorkflows)).Post("/workflows", api.CreateWorkflow)
+			p.With(scope(domain.ScopeWorkflows)).Get("/workflow-runs", api.ListWorkflowRuns)
+			p.With(scope(domain.ScopeWorkflows)).Get("/workflows/{id}", api.GetWorkflow)
+			p.With(scope(domain.ScopeWorkflows)).Put("/workflows/{id}", api.UpdateWorkflow)
+			p.With(scope(domain.ScopeWorkflows)).Delete("/workflows/{id}", api.DeleteWorkflow)
+			p.With(scope(domain.ScopeWorkflows)).Post("/workflows/{id}/test", api.TestWorkflow)
+			p.With(scope(domain.ScopeWorkflows)).Get("/workflows/{id}/runs", api.ListWorkflowRuns)
+
+			// Administrator only
+			p.Group(func(admin chi.Router) {
+				admin.Use(authMw.RequireAdmin)
+				admin.Get("/admin/users", api.AdminListUsers)
+				admin.Patch("/admin/users/{id}", api.AdminUpdateUser)
+				admin.Delete("/admin/users/{id}", api.AdminDeleteUser)
+				admin.Get("/ota/releases", api.ListOtaReleases)
+				admin.Post("/ota/upload", api.UploadOtaRelease)
+			})
+		})
+
+		apiRoute.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			handler.WriteError(w, http.StatusNotFound, "NOT_FOUND", "Unknown API endpoint")
 		})
 	})
 
-	// Public OTA Endpoints
-	r.Get("/api/v1/ota/check", api.CheckOtaUpdate)
-	r.Get("/api/v1/ota/download/{id}", api.DownloadOtaRelease)
-
-	// Protected API Routes
-	r.Route("/api/v1", func(apiRoute chi.Router) {
-		// SMS sending & reading
-		apiRoute.With(authMw.RequireScope(domain.ScopeSMSSend)).Post("/sms/send", api.SendSMS)
-		apiRoute.With(authMw.RequireScope(domain.ScopeSMSRead)).Get("/messages", api.ListMessages)
-		apiRoute.With(authMw.RequireScope(domain.ScopeSMSRead)).Get("/messages/{id}", api.GetMessage)
-
-		// Device Management & Pairing
-		apiRoute.With(authMw.RequireScope(domain.ScopeDevicesManage)).Get("/devices", api.ListDevices)
-		apiRoute.With(authMw.RequireScope(domain.ScopeDevicesManage)).Post("/devices/pair", api.PairDevice)
-		apiRoute.With(authMw.RequireScope(domain.ScopeDevicesManage)).Delete("/devices/{id}", api.DeleteDevice)
-
-		// Webhook Management
-		apiRoute.With(authMw.RequireScope(domain.ScopeWebhooksManage)).Get("/webhooks", api.ListWebhooks)
-		apiRoute.With(authMw.RequireScope(domain.ScopeWebhooksManage)).Post("/webhooks", api.CreateWebhook)
-		apiRoute.With(authMw.RequireScope(domain.ScopeWebhooksManage)).Delete("/webhooks/{id}", api.DeleteWebhook)
-		apiRoute.With(authMw.RequireScope(domain.ScopeWebhooksManage)).Post("/webhooks/{id}/test", api.TestWebhook)
-		apiRoute.With(authMw.RequireScope(domain.ScopeWebhooksManage)).Get("/webhooks/deliveries", api.ListWebhookDeliveries)
-
-		// API Token Management (requires master scope)
-		apiRoute.With(authMw.RequireScope("*")).Get("/tokens", api.ListTokens)
-		apiRoute.With(authMw.RequireScope("*")).Post("/tokens", api.CreateToken)
-		apiRoute.With(authMw.RequireScope("*")).Delete("/tokens/{id}", api.DeleteToken)
-
-		// OTA Management (upload new APK / UI version)
-		apiRoute.With(authMw.RequireScope(domain.ScopeOTAManage)).Post("/ota/upload", api.UploadOtaRelease)
-
-		// Telemetry & Stats
-		apiRoute.With(authMw.RequireScope(domain.ScopeSMSRead)).Get("/system/stats", api.GetSystemStats)
-	})
-
-	// Serve Static UI Assets & SPA fallback
+	// Static dashboard with SPA fallback
 	workDir, _ := filepath.Abs(webDir)
 	fileServer := http.FileServer(http.Dir(workDir))
-
 	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		// Check if requested static file exists
-		targetFile := filepath.Join(workDir, filepath.Clean(r.URL.Path))
-		info, err := os.Stat(targetFile)
-		if err == nil && !info.IsDir() {
+		targetFile := filepath.Join(workDir, filepath.Clean("/"+r.URL.Path))
+		if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+			if strings.HasPrefix(r.URL.Path, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
 			fileServer.ServeHTTP(w, r)
 			return
 		}
-
-		// Fallback to index.html for SPA client-side routing
 		indexPath := filepath.Join(workDir, "index.html")
 		if _, err := os.Stat(indexPath); err == nil {
+			w.Header().Set("Cache-Control", "no-cache")
 			http.ServeFile(w, r, indexPath)
 			return
 		}
-
-		http.NotFound(w, r)
+		http.Error(w, "Dashboard not built. Run: cd dashboard && npm install && npm run build", http.StatusNotFound)
 	})
 
 	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
-	// Graceful shutdown handling
 	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("[HttpSMS] Ready to accept HTTP & WebSocket connections on :%s", port)
@@ -191,4 +241,3 @@ func main() {
 	}
 	fmt.Println("[HttpSMS] Server terminated cleanly.")
 }
-

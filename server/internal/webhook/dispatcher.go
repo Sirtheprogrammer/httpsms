@@ -58,9 +58,12 @@ func (d *Dispatcher) Stop() {
 	d.wg.Wait()
 }
 
-// Dispatch queues an event for delivery to all subscribed webhooks
-func (d *Dispatcher) Dispatch(eventType string, messageID *string, payloadData interface{}) error {
-	webhooks, err := d.store.ListActiveWebhooksForEvent(eventType)
+// Dispatch queues an event for delivery to the owner's subscribed webhooks
+func (d *Dispatcher) Dispatch(owner, eventType string, messageID *string, payloadData interface{}) error {
+	if owner == "" {
+		return nil // unowned data (no accounts yet) has no webhooks
+	}
+	webhooks, err := d.store.ListActiveWebhooksForEvent(owner, eventType)
 	if err != nil {
 		return fmt.Errorf("failed to query webhooks: %w", err)
 	}
@@ -80,14 +83,14 @@ func (d *Dispatcher) Dispatch(eventType string, messageID *string, payloadData i
 
 	for _, wh := range webhooks {
 		delivery := domain.WebhookDelivery{
-			ID:          uuid.New().String(),
-			WebhookID:   wh.ID,
-			MessageID:   messageID,
-			EventType:   eventType,
-			Payload:     string(payloadBytes),
-			Attempt:     1,
-			Status:      "pending",
-			CreatedAt:   time.Now().UTC(),
+			ID:        uuid.New().String(),
+			WebhookID: wh.ID,
+			MessageID: messageID,
+			EventType: eventType,
+			Payload:   string(payloadBytes),
+			Attempt:   1,
+			Status:    "pending",
+			CreatedAt: time.Now().UTC(),
 		}
 
 		if err := d.store.SaveWebhookDelivery(&delivery); err != nil {
@@ -235,7 +238,7 @@ func (d *Dispatcher) retryLoop() {
 			return
 		case <-ticker.C:
 			// Query pending retries from database
-			deliveries, err := d.store.ListWebhookDeliveries("", 50)
+			deliveries, err := d.store.ListWebhookDeliveries("", "", 200)
 			if err != nil {
 				continue
 			}
@@ -243,21 +246,14 @@ func (d *Dispatcher) retryLoop() {
 			now := time.Now().UTC()
 			for _, del := range deliveries {
 				if del.Status == "retrying" && del.NextRetryAt != nil && del.NextRetryAt.Before(now) {
-					// Fetch webhook
-					whs, err := d.store.ListWebhooks()
-					if err != nil {
+					wh, err := d.store.GetWebhook(del.WebhookID)
+					if err != nil || wh == nil || !wh.IsActive {
 						continue
 					}
-					for _, wh := range whs {
-						if wh.ID == del.WebhookID && wh.IsActive {
-							d.executeDelivery(&del, &wh)
-							_ = d.store.SaveWebhookDelivery(&del)
-							break
-						}
-					}
+					d.executeDelivery(&del, wh)
+					_ = d.store.SaveWebhookDelivery(&del)
 				}
 			}
 		}
 	}
 }
-

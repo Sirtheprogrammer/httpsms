@@ -6,23 +6,46 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/httpsms/gateway-server/internal/api/middleware"
 	"github.com/httpsms/gateway-server/internal/domain"
 	"github.com/httpsms/gateway-server/internal/storage"
 	"github.com/httpsms/gateway-server/internal/webhook"
 )
 
-var upgrader = websocket.Upgrader{
+// Phones are native clients without an Origin header, so any origin is fine.
+var deviceUpgrader = websocket.Upgrader{
+	CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
+}
+
+// Dashboards authenticate with a cookie, so only same-origin pages may connect;
+// otherwise any website could open a socket with the user's cookie attached.
+var dashboardUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for dashboard & device connections
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		return err == nil && strings.EqualFold(u.Host, r.Host)
 	},
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 }
+
+// InboundHook runs for every new (non-duplicate) inbound SMS, e.g. to start workflows.
+type InboundHook func(msg domain.Message)
+
+// Authenticator resolves the signed-in user of a dashboard socket request.
+type Authenticator func(r *http.Request) (*middleware.Principal, error)
 
 // Frame represents a JSON message exchanged over the WebSocket connection
 type Frame struct {
@@ -35,6 +58,7 @@ type Frame struct {
 // DeviceConn represents an active connection to an Android phone
 type DeviceConn struct {
 	DeviceID string
+	OwnerID  string
 	Conn     *websocket.Conn
 	SendChan chan []byte
 	Hub      *Hub
@@ -43,6 +67,8 @@ type DeviceConn struct {
 // DashboardConn represents an active connection to a browser UI
 type DashboardConn struct {
 	ID       string
+	UserID   string
+	IsAdmin  bool
 	Conn     *websocket.Conn
 	SendChan chan []byte
 	Hub      *Hub
@@ -61,9 +87,21 @@ type Hub struct {
 	registerDash   chan *DashboardConn
 	unregisterDash chan *DashboardConn
 
-	broadcastDash chan []byte
+	broadcastDash chan dashEvent
 	mu            sync.RWMutex
+
+	auth      Authenticator
+	onInbound InboundHook
 }
+
+type dashEvent struct {
+	owner   string
+	payload []byte
+}
+
+// SetAuthenticator and SetInboundHook complete wiring after construction.
+func (h *Hub) SetAuthenticator(a Authenticator) { h.auth = a }
+func (h *Hub) SetInboundHook(fn InboundHook)    { h.onInbound = fn }
 
 func NewHub(store *storage.DB, dispatcher *webhook.Dispatcher) *Hub {
 	return &Hub{
@@ -75,7 +113,7 @@ func NewHub(store *storage.DB, dispatcher *webhook.Dispatcher) *Hub {
 		unregisterDevice: make(chan *DeviceConn),
 		registerDash:     make(chan *DashboardConn),
 		unregisterDash:   make(chan *DashboardConn),
-		broadcastDash:    make(chan []byte, 256),
+		broadcastDash:    make(chan dashEvent, 256),
 	}
 }
 
@@ -122,11 +160,14 @@ func (h *Hub) Run() {
 			}
 			h.mu.Unlock()
 
-		case msg := <-h.broadcastDash:
+		case ev := <-h.broadcastDash:
 			h.mu.RLock()
 			for _, dash := range h.dashboards {
+				if !dash.IsAdmin && dash.UserID != ev.owner {
+					continue
+				}
 				select {
-				case dash.SendChan <- msg:
+				case dash.SendChan <- ev.payload:
 				default:
 					// Slow client, skip frame
 				}
@@ -136,7 +177,8 @@ func (h *Hub) Run() {
 	}
 }
 
-func (h *Hub) BroadcastToDashboards(eventType string, data interface{}) {
+// BroadcastToDashboards sends an event to the owner's dashboards and to admins.
+func (h *Hub) BroadcastToDashboards(owner, eventType string, data interface{}) {
 	payload, err := json.Marshal(map[string]interface{}{
 		"event": eventType,
 		"data":  data,
@@ -146,7 +188,7 @@ func (h *Hub) BroadcastToDashboards(eventType string, data interface{}) {
 		return
 	}
 	select {
-	case h.broadcastDash <- payload:
+	case h.broadcastDash <- dashEvent{owner: owner, payload: payload}:
 	default:
 	}
 }
@@ -154,12 +196,13 @@ func (h *Hub) BroadcastToDashboards(eventType string, data interface{}) {
 func (h *Hub) broadcastDeviceStatus(deviceID, status string) {
 	// Update device status in DB
 	d, err := h.store.GetDevice(deviceID)
-	if err == nil && d != nil {
-		d.Status = status
-		_ = h.store.UpsertDevice(d)
+	if err != nil || d == nil {
+		return
 	}
+	d.Status = status
+	_ = h.store.UpsertDevice(d)
 
-	h.BroadcastToDashboards("device.status", map[string]string{
+	h.BroadcastToDashboards(d.UserID, "device.status", map[string]string{
 		"device_id": deviceID,
 		"status":    status,
 	})
@@ -169,21 +212,20 @@ func (h *Hub) broadcastDeviceStatus(deviceID, status string) {
 func (h *Hub) SendSmsCommand(msg *domain.Message) error {
 	h.mu.RLock()
 	devConn, ok := h.devices[msg.DeviceID]
-	h.mu.RUnlock()
-
-	if !ok {
-		// If specific device not specified or offline, try to find any online device
-		if msg.DeviceID == "" {
-			h.mu.RLock()
-			for _, c := range h.devices {
-				devConn = c
+	if ok && devConn.OwnerID != msg.UserID {
+		ok = false
+	}
+	if !ok && msg.DeviceID == "" {
+		// Auto-route through any online phone belonging to the same user.
+		for _, c := range h.devices {
+			if c.OwnerID == msg.UserID {
+				devConn, ok = c, true
 				msg.DeviceID = c.DeviceID
-				ok = true
 				break
 			}
-			h.mu.RUnlock()
 		}
 	}
+	h.mu.RUnlock()
 
 	if !ok || devConn == nil {
 		return ErrDeviceOffline
@@ -207,10 +249,29 @@ func (h *Hub) SendSmsCommand(msg *domain.Message) error {
 	if !devConn.trySend(frameBytes) {
 		return ErrDeviceBusy
 	}
+	_ = h.store.SetMessageDevice(msg.ID, msg.DeviceID)
 	_ = h.store.UpdateMessageStatus(msg.ID, domain.MessageStatusDispatched, "", nil, nil)
 	msg.Status = domain.MessageStatusDispatched
-	h.BroadcastToDashboards("message.dispatched", msg)
+	h.BroadcastToDashboards(msg.UserID, "message.dispatched", msg)
 	return nil
+}
+
+// IsOnline reports whether a device currently has a live connection.
+func (h *Hub) IsOnline(deviceID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.devices[deviceID]
+	return ok
+}
+
+// Disconnect drops a device's socket, e.g. after it is unpaired.
+func (h *Hub) Disconnect(deviceID string) {
+	h.mu.RLock()
+	c, ok := h.devices[deviceID]
+	h.mu.RUnlock()
+	if ok {
+		_ = c.Conn.Close()
+	}
 }
 
 // trySend queues a frame without blocking. The hub closes SendChan when a
@@ -265,7 +326,7 @@ func (h *Hub) HandleDeviceWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := deviceUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WebSocket] Upgrade error: %v", err)
 		return
@@ -273,6 +334,7 @@ func (h *Hub) HandleDeviceWs(w http.ResponseWriter, r *http.Request) {
 
 	devConn := &DeviceConn{
 		DeviceID: device.ID,
+		OwnerID:  device.UserID,
 		Conn:     conn,
 		SendChan: make(chan []byte, 128),
 		Hub:      h,
@@ -286,13 +348,25 @@ func (h *Hub) HandleDeviceWs(w http.ResponseWriter, r *http.Request) {
 
 // HandleDashboardWs handles the WebSocket connection from the web dashboard
 func (h *Hub) HandleDashboardWs(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	if h.auth == nil {
+		http.Error(w, "dashboard auth not configured", http.StatusInternalServerError)
+		return
+	}
+	p, err := h.auth(r)
+	if err != nil || p == nil {
+		http.Error(w, "Sign in required", http.StatusUnauthorized)
+		return
+	}
+
+	conn, err := dashboardUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 
 	dash := &DashboardConn{
 		ID:       uuid.New().String(),
+		UserID:   p.UserID(),
+		IsAdmin:  p.IsAdmin(),
 		Conn:     conn,
 		SendChan: make(chan []byte, 128),
 		Hub:      h,
@@ -389,7 +463,7 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 						dev = fresh
 					}
 				}
-				c.Hub.BroadcastToDashboards("device.heartbeat", dev)
+				c.Hub.BroadcastToDashboards(dev.UserID, "device.heartbeat", dev)
 			}
 		}
 
@@ -407,6 +481,7 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 			msgID := uuid.New().String()
 			msg := domain.Message{
 				ID:             msgID,
+				UserID:         c.OwnerID,
 				Direction:      domain.DirectionInbound,
 				DeviceID:       c.DeviceID,
 				SimSlot:        payload.SimSlot,
@@ -432,8 +507,11 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 				// ONLY dispatch webhooks and dashboard event if it's NOT a duplicate!
 				if isNew {
 					log.Printf("[SMS] Received unique incoming message from %s: %s (id: %s)", msg.Sender, msg.Body, msg.ID)
-					c.Hub.BroadcastToDashboards("sms.received", msg)
-					_ = c.Hub.dispatcher.Dispatch(domain.EventSMSReceived, &msg.ID, msg)
+					c.Hub.BroadcastToDashboards(c.OwnerID, "sms.received", msg)
+					_ = c.Hub.dispatcher.Dispatch(c.OwnerID, domain.EventSMSReceived, &msg.ID, msg)
+					if c.Hub.onInbound != nil {
+						c.Hub.onInbound(msg)
+					}
 				} else {
 					log.Printf("[SMS] Duplicate incoming message discarded (key: %s)", payload.IdempotencyKey)
 				}
@@ -455,10 +533,14 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 				deliveredAt = &now
 			}
 
-			_ = c.Hub.store.UpdateMessageStatus(payload.MessageID, payload.Status, payload.ErrorMessage, sentAt, deliveredAt)
 			msg, _ := c.Hub.store.GetMessage(payload.MessageID)
+			if msg == nil || msg.UserID != c.OwnerID {
+				break // a phone may only report on its owner's messages
+			}
+			_ = c.Hub.store.UpdateMessageStatus(payload.MessageID, payload.Status, payload.ErrorMessage, sentAt, deliveredAt)
+			msg, _ = c.Hub.store.GetMessage(payload.MessageID)
 
-			c.Hub.BroadcastToDashboards("sms.status", map[string]interface{}{
+			c.Hub.BroadcastToDashboards(c.OwnerID, "sms.status", map[string]interface{}{
 				"message_id": payload.MessageID,
 				"status":     payload.Status,
 				"error":      payload.ErrorMessage,
@@ -473,7 +555,7 @@ func (c *DeviceConn) handleIncomingFrame(frame *Frame) {
 			}
 
 			if msg != nil {
-				_ = c.Hub.dispatcher.Dispatch(eventType, &payload.MessageID, msg)
+				_ = c.Hub.dispatcher.Dispatch(c.OwnerID, eventType, &payload.MessageID, msg)
 			}
 		}
 	}
@@ -524,4 +606,3 @@ func (c *DashboardConn) writePump() {
 		}
 	}
 }
-

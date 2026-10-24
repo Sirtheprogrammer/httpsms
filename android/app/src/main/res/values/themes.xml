@@ -1,17 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Filled buttons always use the lime brand fill with near-black text. -->
+    <style name="Widget.Gateway.Button.Brand" parent="Widget.Material3.Button">
+        <item name="backgroundTint">@color/brand_fill</item>
+        <item name="android:textColor">@color/on_brand</item>
+        <item name="iconTint">@color/on_brand</item>
+    </style>
+
     <style name="Theme.Gateway" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">#2563EB</item>
+        <!-- Dark lime keeps text, outlines and focus states readable on light surfaces -->
+        <item name="colorPrimary">@color/brand_dark</item>
         <item name="colorOnPrimary">#FFFFFF</item>
-        <item name="colorPrimaryContainer">#DBE4FF</item>
-        <item name="colorOnPrimaryContainer">#0B1E5B</item>
-        <item name="colorSecondaryContainer">#E2E8F0</item>
-        <item name="colorOnSecondaryContainer">#0F172A</item>
-        <item name="android:colorBackground">#F1F5F9</item>
-        <item name="colorSurface">#F1F5F9</item>
+        <item name="colorPrimaryContainer">@color/brand_fill</item>
+        <item name="colorOnPrimaryContainer">@color/on_brand</item>
+        <item name="colorSecondaryContainer">#EAFFB8</item>
+        <item name="colorOnSecondaryContainer">@color/on_brand</item>
+        <item name="android:colorBackground">#F6F8F0</item>
+        <item name="colorSurface">#F6F8F0</item>
         <item name="colorSurfaceContainerLow">#FFFFFF</item>
-        <item name="android:statusBarColor">#F1F5F9</item>
+        <item name="colorOnSurface">#151A0B</item>
+        <item name="colorOnSurfaceVariant">#4A5338</item>
+        <item name="colorOutline">#C9D1B3</item>
+        <item name="materialButtonStyle">@style/Widget.Gateway.Button.Brand</item>
+        <item name="android:statusBarColor">#F6F8F0</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:navigationBarColor">#F1F5F9</item>
+        <item name="android:navigationBarColor">#F6F8F0</item>
     </style>
 </resources>

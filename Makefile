@@ -1,6 +1,10 @@
-.PHONY: all build run test docker-build docker-up docker-down clean
+.PHONY: all build dashboard run dev test docker-build docker-up docker-down clean
 
-all: build
+all: dashboard build
+
+dashboard:
+	@echo "==> Building React dashboard..."
+	@cd dashboard && npm ci --no-audit --no-fund && npm run build
 
 build:
 	@echo "==> Building Go Backend Binary..."
@@ -8,7 +12,11 @@ build:
 
 run: build
 	@echo "==> Starting HttpSMS Gateway Server locally..."
-	@cd server && DB_PATH=./data/httpsms.db WEB_DIR=../web OTA_DIR=./data/ota ./bin/server
+	@cd server && DB_PATH=./data/httpsms.db WEB_DIR=../dashboard/dist OTA_DIR=./data/ota ./bin/server
+
+# Dashboard with hot reload on :5173 (proxies to the server on :8080; run `make run` too)
+dev:
+	@cd dashboard && npm run dev
 
 test:
 	@echo "==> Running Go unit tests..."

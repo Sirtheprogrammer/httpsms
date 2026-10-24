@@ -12,7 +12,11 @@ services:
       - DB_PATH=/app/data/httpsms.db
       - OTA_DIR=/app/data/ota
       - WEB_DIR=/app/web
-      - MASTER_SECRET=htsms_admin_secret_change_me
+      # Encrypts users' AI provider keys. If unset, a key is generated in ./data/secret.key;
+      # back that file up — losing it makes stored keys unreadable.
+      - SECRET_KEY=${SECRET_KEY:-}
+      # Optional legacy admin API secret (acts as the first admin). Leave empty to disable.
+      - MASTER_SECRET=${MASTER_SECRET:-}
     volumes:
       - ./data:/app/data
     healthcheck:
@@ -21,4 +25,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
-

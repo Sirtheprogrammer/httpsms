@@ -72,7 +72,7 @@ func TestMessageDeduplication(t *testing.T) {
 	}
 
 	// Verify only 1 message exists in total
-	messages, total, err := db.ListMessages("", "", 10, 0)
+	messages, total, err := db.ListMessages(MessageFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("Failed to list messages: %v", err)
 	}
@@ -159,7 +159,6 @@ func TestDeviceAndSimPersistence(t *testing.T) {
 	}
 }
 
-
 func TestEmptyListsEncodeAsArrays(t *testing.T) {
 	db, err := NewDB(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -167,11 +166,11 @@ func TestEmptyListsEncodeAsArrays(t *testing.T) {
 	}
 	defer db.Close()
 
-	devices, _ := db.ListDevices()
-	webhooks, _ := db.ListWebhooks()
-	tokens, _ := db.ListApiTokens()
-	deliveries, _ := db.ListWebhookDeliveries("", 10)
-	messages, _, _ := db.ListMessages("", "", 10, 0)
+	devices, _ := db.ListDevices("")
+	webhooks, _ := db.ListWebhooks("")
+	tokens, _ := db.ListApiTokens("")
+	deliveries, _ := db.ListWebhookDeliveries("", "", 10)
+	messages, _, _ := db.ListMessages(MessageFilter{Limit: 10})
 
 	for name, v := range map[string]interface{}{
 		"devices": devices, "webhooks": webhooks, "tokens": tokens,
@@ -204,5 +203,42 @@ func TestReplaceDeviceSimCardsDualSim(t *testing.T) {
 	got, _ := db.GetDeviceSimCards(dev.ID)
 	if len(got) != 2 {
 		t.Fatalf("got %d SIMs, want 2", len(got))
+	}
+}
+
+func TestFirstUserIsAdminAndAdoptsLegacyData(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Close()
+
+	legacy := domain.Device{ID: "dev_legacy", Name: "Old phone", TokenHash: "h", Status: "offline", CreatedAt: time.Now().UTC()}
+	if err := db.UpsertDevice(&legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	first := &domain.User{ID: "u1", Email: "a@example.com", Role: domain.RoleUser, PasswordHash: "x", CreatedAt: time.Now().UTC()}
+	if err := db.CreateUser(first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Role != domain.RoleAdmin {
+		t.Fatalf("first user role = %s, want admin", first.Role)
+	}
+	second := &domain.User{ID: "u2", Email: "b@example.com", Role: domain.RoleUser, PasswordHash: "x", CreatedAt: time.Now().UTC()}
+	if err := db.CreateUser(second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Role != domain.RoleUser {
+		t.Fatalf("second user role = %s, want user", second.Role)
+	}
+	if err := db.CreateUser(&domain.User{ID: "u3", Email: "A@example.com", PasswordHash: "x", CreatedAt: time.Now().UTC()}); err != ErrEmailTaken {
+		t.Fatalf("duplicate email (case-insensitive) err = %v", err)
+	}
+
+	mine, _ := db.ListDevices("u1")
+	theirs, _ := db.ListDevices("u2")
+	if len(mine) != 1 || len(theirs) != 0 {
+		t.Fatalf("legacy device adoption: admin=%d other=%d", len(mine), len(theirs))
 	}
 }

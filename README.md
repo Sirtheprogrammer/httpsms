@@ -1,6 +1,6 @@
 # HttpSMS Gateway & Telemetry Platform
 
-An enterprise-grade, self-hosted SMS gateway infrastructure that transforms Android devices into programmable, high-reliability SMS endpoints. Features zero-duplicate delivery semantics, full bi-directional cellular bridging, signed webhooks with exponential backoff, scoped API token authorization, Over-The-Air (OTA) app updates, and a high-density telecommunications telemetry dashboard built with Vanilla JS.
+An enterprise-grade, self-hosted SMS gateway infrastructure that transforms Android devices into programmable, high-reliability SMS endpoints. Features zero-duplicate delivery semantics, full bi-directional cellular bridging, signed webhooks with exponential backoff, scoped API token authorization, Over-The-Air (OTA) app updates, multi-user accounts, and a visual workflow builder for SMS AI agents (OpenAI, Anthropic, Gemini, DeepSeek; bring your own key).
 
 ---
 
@@ -13,7 +13,10 @@ An enterprise-grade, self-hosted SMS gateway infrastructure that transforms Andr
 - **Dual-SIM & Multipart SMS Routing**: Automatic detection of active SIM slots via Android `SubscriptionManager`, with automatic GSM 7-bit vs UCS-2 Unicode character analysis.
 - **Webhook Dispatcher Pool**: Real-time async webhook delivery with HMAC-SHA256 payload signing (`X-Signature-SHA256`), configurable event subscriptions, and exponential retry backoff (15s, 1m, 5m, 15m, 1h).
 - **Over-The-Air (OTA) Updates**: Remote APK publishing, integrity checksum validation, and native Android `PackageInstaller` auto-updates.
-- **Bespoke Telemetry Dashboard**: Crafted with modern Vanilla JS and clean CSS tokens — rejecting cliché AI-generated designs in favor of a sleek, high-density telecommunications operations console.
+- **Multi-user**: open sign-up; the first account becomes the administrator. Each user owns their own phones, messages, webhooks, API tokens and workflows. Admins see everything, manage users and publish app releases.
+- **Workflow builder for AI agents**: a drag-and-drop canvas (React Flow). Trigger on incoming SMS, call an AI model, branch on conditions, send SMS, call HTTP APIs, wait. AI steps can remember the conversation with each contact.
+- **Bring your own key**: users add their own OpenAI, Anthropic, Gemini or DeepSeek keys, encrypted at rest with AES-256-GCM and never shown to anyone (admins included).
+- **React dashboard**: light/dark, mobile-friendly, live updates over an authenticated WebSocket.
 
 ---
 
@@ -30,7 +33,13 @@ cd httpsms
 docker compose up -d
 ```
 
-Access the Web Console at `http://localhost:8080`.
+Open `http://localhost:8080` and create the first account; it becomes the administrator.
+
+| Variable | Purpose |
+|---|---|
+| `SECRET_KEY` | Encrypts users' AI provider keys. If unset, a random key is created at `data/secret.key`. Back it up: losing it makes stored keys unreadable. |
+| `MASTER_SECRET` | Optional legacy admin Bearer token for scripts. Leave empty to disable. |
+| `DB_PATH`, `OTA_DIR`, `WEB_DIR`, `PORT` | Storage paths, built dashboard directory, listen port. |
 
 To view container logs:
 ```bash
@@ -42,11 +51,14 @@ docker compose logs -f
 ## Local Development & Make Commands
 
 ```bash
-# Build the Go backend binary
-make build
+# Build the React dashboard (dashboard/dist) and the Go server
+make all
 
-# Run local development server
+# Run the server on :8080 (serves dashboard/dist)
 make run
+
+# Dashboard with hot reload on :5173, proxying API calls to :8080
+make dev
 
 # Execute Go unit tests (Deduplication & HMAC tests)
 make test
@@ -90,7 +102,21 @@ unless the user exempts them, which is what the in-app checklist and the
 
 ---
 
+## Workflows & AI agents
+
+1. **AI keys** → *Add key*: pick a provider and paste your key. It's verified by listing the provider's models, then stored encrypted.
+2. **Workflows** → *New workflow*: start from a template (AI auto-reply, keyword responder, AI triage + escalation, forward to API) or a blank canvas.
+3. Click a step to configure it. Text fields accept variables such as `{{trigger.body}}`, `{{trigger.sender}}` or `{{ai_1.text}}` (click the chips to insert them).
+4. **Test** runs the canvas against a sample SMS: AI steps really call the model, SMS and non-GET HTTP steps are simulated. Then flip the toggle to go live.
+
+Safety: a workflow stops running for a sender after 10 runs in 10 minutes, so two auto-replying gateways can't text each other forever. Waits are capped at 5 minutes and runs at 50 steps.
+
+---
+
 ##  REST API Reference
+
+API tokens (`htsms_live_…`, created under **API tokens**) belong to the user who made them and only see that user's data. Scopes: `sms:send`, `sms:read`, `devices:manage`, `webhooks:manage`, `workflows:manage`, or `*`.
+
 
 All requests must include an `Authorization: Bearer <API_TOKEN>` header (or the master administrative secret).
 

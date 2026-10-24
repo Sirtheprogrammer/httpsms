@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="brand">#2563EB</color>
-    <color name="status_online">#16A34A</color>
-    <color name="status_connecting">#D97706</color>
+    <!-- Brand: lime #CCFF33 and its family -->
+    <color name="brand">#CCFF33</color>
+    <color name="brand_fill">#CCFF33</color>
+    <color name="on_brand">#1A2600</color>
+    <color name="brand_dark">#4D6B00</color>
+    <color name="status_online">#4D8A0A</color>
+    <color name="status_connecting">#C2780A</color>
     <color name="status_offline">#DC2626</color>
-    <color name="status_stopped">#64748B</color>
-    <color name="launcher_background">#0F172A</color>
+    <color name="status_stopped">#838C70</color>
+    <color name="launcher_background">#1A2600</color>
 </resources>
