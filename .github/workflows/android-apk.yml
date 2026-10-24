@@ -1,0 +1,66 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      # Kotlin 2.0.0 can't run on JDK 25, so pin a JDK 17 toolchain.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-configuration-cache
+
+      - name: Prepare release info
+        id: info
+        run: |
+          version=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          tag="apk-v${version}-build.${{ github.run_number }}"
+          apk="httpsms-gateway-${version}-build.${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$apk"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "apk=android/$apk" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: ${{ steps.info.outputs.apk }}
+
+      - name: Publish GitHub release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.info.outputs.tag }}" \
+            "${{ steps.info.outputs.apk }}" \
+            --target "${{ github.sha }}" \
+            --title "Android ${{ steps.info.outputs.version }} (build ${{ github.run_number }})" \
+            --notes "Debug APK built from ${{ github.sha }}." \
+            --latest
