@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#080B11"
+    android:padding="20dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="HttpSMS Gateway"
+            android:textColor="#F3F6FC"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/text_version_info"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Version 1.0.0"
+            android:textColor="#55657E"
+            android:textSize="12sp" />
+
+        <!-- Server Configuration Section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="GATEWAY SERVER URL"
+            android:textColor="#94A3B8"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/edit_server_url"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#0E131F"
+            android:hint="http://192.168.1.50:8080"
+            android:inputType="textUri"
+            android:padding="12dp"
+            android:textColor="#F3F6FC"
+            android:textColorHint="#55657E"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="DEVICE PAIRING TOKEN"
+            android:textColor="#94A3B8"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/edit_device_token"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#0E131F"
+            android:hint="htdev_..."
+            android:inputType="text"
+            android:padding="12dp"
+            android:textColor="#F3F6FC"
+            android:textColorHint="#55657E"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btn_save_config"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:backgroundTint="#141B2C"
+            android:text="Save Connection Config"
+            android:textColor="#F3F6FC" />
+
+        <!-- Status & Telemetry Section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="ACTIVE CELLULAR MODEMS (SIM)"
+            android:textColor="#94A3B8"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/text_active_sims"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#0E131F"
+            android:padding="12dp"
+            android:text="Scanning for active SIM cards..."
+            android:textColor="#10B981"
+            android:textSize="13sp" />
+
+        <!-- Actions -->
+        <Button
+            android:id="@+id/btn_start_service"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:backgroundTint="#3B82F6"
+            android:text="Start Gateway Service"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/btn_check_ota"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:backgroundTint="#10B981"
+            android:text="Check for OTA Updates"
+            android:textColor="#FFFFFF" />
+
+    </LinearLayout>
+</ScrollView>
+
