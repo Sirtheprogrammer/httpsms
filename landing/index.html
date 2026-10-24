@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HttpSMS: your Android phone as an SMS gateway</title>
+  <meta name="description" content="Self-hosted SMS gateway. Pair Android phones with a QR code, send and receive SMS over an API, and build AI agents that answer texts." />
+  <meta name="theme-color" content="#0b0e07" />
+  <meta property="og:title" content="HttpSMS: your Android phone as an SMS gateway" />
+  <meta property="og:description" content="Self-hosted SMS gateway with a visual AI workflow builder. Bring your own OpenAI, Anthropic, Gemini or DeepSeek key." />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="logo" href="#top" aria-label="HttpSMS home">
+        <span class="logo-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+        HttpSMS
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#self-host">Self-host</a>
+      </nav>
+      <a class="btn btn-ghost js-repo" href="https://github.com/Sirtheprogrammer/httpsms" target="_blank" rel="noopener">
+        <svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="hide-sm">GitHub</span>
+        <span class="stars" aria-label="GitHub stars"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg><span class="js-stars">–</span></span>
+      </a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="glow" aria-hidden="true"></div>
+      <div class="wrap hero-inner">
+        <a class="pill js-release-pill" href="https://github.com/Sirtheprogrammer/httpsms/releases/latest" target="_blank" rel="noopener">
+          <span class="pill-dot"></span><span class="js-pill-text">Open source · self-hosted</span>
+        </a>
+        <h1>Your Android phone,<br /><span class="lime">now an SMS gateway.</span></h1>
+        <p class="lead">
+          Pair a phone with a QR code, send and receive SMS over a simple API, and build AI agents that
+          answer texts, using OpenAI, Anthropic, Gemini or DeepSeek with your own key.
+        </p>
+        <div class="cta">
+          <a class="btn btn-primary btn-lg js-download" href="https://github.com/Sirtheprogrammer/httpsms/releases/latest" rel="noopener">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+            <span class="js-download-label">Download APK</span>
+          </a>
+          <a class="btn btn-outline btn-lg" href="https://github.com/Sirtheprogrammer/httpsms" target="_blank" rel="noopener">
+            <svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+            Star on GitHub
+            <span class="count js-stars">–</span>
+          </a>
+        </div>
+        <p class="fineprint js-download-meta">Android 8.0+ · signed APK from GitHub Releases</p>
+      </div>
+
+      <!-- Minimal, static preview of the dashboard -->
+      <div class="wrap">
+        <div class="preview" role="img" aria-label="Preview of the HttpSMS dashboard showing stats, recent messages and an AI workflow">
+          <div class="window-bar"><span></span><span></span><span></span><div class="url">your-server:8080</div></div>
+          <div class="app">
+            <aside class="side">
+              <div class="side-brand"><span class="logo-mark sm"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>HttpSMS</div>
+              <div class="side-item active">Overview</div>
+              <div class="side-item">Messages</div>
+              <div class="side-item">Send SMS</div>
+              <div class="side-item">Phones</div>
+              <div class="side-label">Build</div>
+              <div class="side-item">Workflows</div>
+              <div class="side-item">AI keys</div>
+              <div class="side-item">Webhooks</div>
+            </aside>
+            <div class="body">
+              <div class="stats">
+                <div class="stat"><small>Phones online</small><b>2/2</b></div>
+                <div class="stat"><small>Received</small><b>1,284</b></div>
+                <div class="stat"><small>Sent</small><b>963</b></div>
+                <div class="stat"><small>Active workflows</small><b>3</b></div>
+              </div>
+              <div class="panels">
+                <div class="panel">
+                  <div class="panel-title">Recent messages</div>
+                  <div class="msg"><i class="in"></i><div><b>+255 712 *** 401</b><span>What time do you open tomorrow?</span></div><em class="tag ok">received</em></div>
+                  <div class="msg"><i class="out"></i><div><b>+255 712 *** 401</b><span>We open at 8:00 AM. See you then!</span></div><em class="tag sent">delivered</em></div>
+                  <div class="msg"><i class="in"></i><div><b>+254 701 *** 088</b><span>PRICE list please</span></div><em class="tag ok">received</em></div>
+                  <div class="msg"><i class="out"></i><div><b>+254 701 *** 088</b><span>Basic 5,000 · Pro 12,000. Reply BUY to order.</span></div><em class="tag sent">sent</em></div>
+                </div>
+                <div class="panel flow">
+                  <div class="panel-title">AI auto-reply agent <em class="tag live">live</em></div>
+                  <div class="nodes">
+                    <div class="node"><span class="ni blue"></span>Incoming SMS</div>
+                    <div class="edge"></div>
+                    <div class="node"><span class="ni violet"></span>AI agent<small>claude-opus-5-5</small></div>
+                    <div class="edge"></div>
+                    <div class="node"><span class="ni lime"></span>Send SMS<small>{{ai_1.text}}</small></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <div class="wrap">
+        <h2>Everything to run SMS from your own server</h2>
+        <div class="features">
+          <article class="feature"><div class="fi"><svg viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h3v3h-3zM17 17h4v4h-4"/></svg></div><h3>Pair with a QR code</h3><p>Scan once from the app. Dual-SIM phones work, with SIM, battery and signal shown live.</p></article>
+          <article class="feature"><div class="fi"><svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg></div><h3>AI agents, visually</h3><p>Drag-and-drop workflows: trigger, AI agent, condition, send SMS, HTTP call. Agents remember each conversation.</p></article>
+          <article class="feature"><div class="fi"><svg viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></div><h3>Bring your own key</h3><p>OpenAI, Anthropic, Gemini or DeepSeek. Keys are encrypted on your server and only you can use them.</p></article>
+          <article class="feature"><div class="fi"><svg viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg></div><h3>Simple REST API</h3><p>Send with one <code>POST</code>. Scoped tokens, idempotency keys and signed webhooks with retries.</p></article>
+          <article class="feature"><div class="fi"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><h3>Multi-user</h3><p>Everyone gets their own phones, messages and workflows. One admin manages users and app updates.</p></article>
+          <article class="feature"><div class="fi"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg></div><h3>Stays online</h3><p>Foreground service, auto-reconnect, restart after reboot and a watchdog against aggressive battery savers.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section id="how" class="section alt">
+      <div class="wrap">
+        <h2>Up and running in three steps</h2>
+        <ol class="steps">
+          <li><span>1</span><h3>Start the server</h3><p>Run it with Docker on any machine your phone can reach, then create the admin account.</p></li>
+          <li><span>2</span><h3>Install &amp; pair</h3><p>Install the APK, tap <b>Scan pairing QR</b> and point it at the dashboard. Done.</p></li>
+          <li><span>3</span><h3>Automate</h3><p>Send from the API or let a workflow answer incoming texts with the AI model you choose.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="self-host" class="section">
+      <div class="wrap selfhost">
+        <div>
+          <h2>Self-host in a minute</h2>
+          <p class="muted">Your messages and keys never leave your server. One container, SQLite storage, no external services.</p>
+          <div class="cta left">
+            <a class="btn btn-primary js-download" href="https://github.com/Sirtheprogrammer/httpsms/releases/latest" rel="noopener">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+              <span class="js-download-label">Download APK</span>
+            </a>
+            <a class="btn btn-outline" href="https://github.com/Sirtheprogrammer/httpsms#readme" target="_blank" rel="noopener">Read the docs</a>
+          </div>
+        </div>
+        <pre class="code"><code><span class="c"># clone and start</span>
+git clone https://github.com/Sirtheprogrammer/httpsms.git
+cd httpsms
+docker compose up -d
+
+<span class="c"># open http://localhost:8080 and sign up</span>
+
+<span class="c"># send an SMS</span>
+curl -X POST http://localhost:8080/api/v1/sms/send \
+  -H "Authorization: Bearer htsms_live_…" \
+  -d '{"recipient":"+255712345678","body":"Hello!"}'</code></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <span>HttpSMS · open source</span>
+      <a href="https://github.com/Sirtheprogrammer/httpsms" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/Sirtheprogrammer/httpsms/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/Sirtheprogrammer/httpsms/issues" target="_blank" rel="noopener">Report an issue</a>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
