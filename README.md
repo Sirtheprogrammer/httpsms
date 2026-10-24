@@ -8,7 +8,7 @@ An enterprise-grade, self-hosted SMS gateway infrastructure that transforms Andr
 
 - **Duplex Persistent Bridge (WebSocket TLS)**: Bypasses mobile carrier NAT and cellular firewalls without requiring static or public IPs on Android handsets.
 - **Zero-Duplicate Guarantee**: Multi-layer deduplication combining on-device Room SQLite fingerprinting:
-  $$\text{SHA-256}(\text{Sender} + \lfloor\text{Timestamp}/60000\rfloor + \text{SIM\_Slot} + \text{NormalizedBody})$$
+  `SHA-256(sender + floor(timestamp / 60000) + sim_slot + normalized_body)`
   with server-side idempotency keys and transactional outbox queues.
 - **Dual-SIM & Multipart SMS Routing**: Automatic detection of active SIM slots via Android `SubscriptionManager`, with automatic GSM 7-bit vs UCS-2 Unicode character analysis.
 - **Webhook Dispatcher Pool**: Real-time async webhook delivery with HMAC-SHA256 payload signing (`X-Signature-SHA256`), configurable event subscriptions, and exponential retry backoff (15s, 1m, 5m, 15m, 1h).
