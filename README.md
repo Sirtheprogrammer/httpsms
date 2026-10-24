@@ -33,7 +33,7 @@ cd httpsms
 docker compose up -d
 ```
 
-Open `http://localhost:8080` and create the first account; it becomes the administrator.
+Open `http://localhost:8080`. Visitors who aren't signed in see a landing page with the latest Android APK (fetched from GitHub Releases) and a link to sign up. Create the first account; it becomes the administrator.
 
 | Variable | Purpose |
 |---|---|
