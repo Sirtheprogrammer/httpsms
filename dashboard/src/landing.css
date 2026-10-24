@@ -62,9 +62,6 @@
 .lp-hero { position: relative; padding: 88px 0 64px; overflow: hidden; }
 .lp-glow { position: absolute; inset: -20% -10% auto; height: 720px; background: radial-gradient(50% 55% at 50% 25%, rgba(204, 255, 51, 0.18), transparent 70%); pointer-events: none; }
 .lp-hero-inner { position: relative; text-align: center; display: flex; flex-direction: column; align-items: center; }
-.lp-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; font-size: 13.5px; color: var(--text-2); background: rgba(21, 26, 14, 0.7); margin-bottom: 26px; }
-.lp-pill:hover { border-color: var(--lime); color: var(--text); }
-.lp-pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 0 4px var(--lime-soft); }
 .lp-hero h1 { font-size: clamp(38px, 6.4vw, 72px); font-weight: 800; letter-spacing: -0.035em; }
 .lp-lead { max-width: 640px; margin-top: 22px; font-size: clamp(16px, 2vw, 19px); color: var(--text-2); }
 .lp-cta { display: flex; gap: 12px; margin-top: 34px; flex-wrap: wrap; justify-content: center; }

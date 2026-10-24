@@ -102,10 +102,6 @@ export function LandingPage() {
         <section className="lp-hero">
           <div className="lp-glow" aria-hidden="true" />
           <div className="lp-wrap lp-hero-inner">
-            <a className="lp-pill" href={RELEASES_URL} target="_blank" rel="noopener noreferrer">
-              <span className="lp-pill-dot" />
-              {release ? <>Android app v{release.version} is out · see what’s new</> : 'Open source · self-hosted'}
-            </a>
             <h1>Your Android phone,<br /><span className="lp-lime">now an SMS gateway.</span></h1>
             <p className="lp-lead">
               Pair a phone with a QR code, send and receive SMS over a simple API, and build AI agents that answer texts,
