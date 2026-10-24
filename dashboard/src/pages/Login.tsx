@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Icon } from '../components/icons';
@@ -39,10 +40,10 @@ export function LoginPage() {
   return (
     <div className="auth-page">
       <section className="auth-side">
-        <div className="row" style={{ fontWeight: 700, fontSize: 16 }}>
+        <Link to="/" className="row" style={{ fontWeight: 700, fontSize: 16, color: 'inherit', textDecoration: 'none' }}>
           <div className="brand-mark"><Icon name="message" width={17} height={17} /></div>
           HttpSMS
-        </div>
+        </Link>
         <div>
           <h1>Turn Android phones into a <span>programmable SMS gateway.</span></h1>
           <ul>
@@ -56,6 +57,7 @@ export function LoginPage() {
 
       <section className="auth-form">
         <form className="auth-card" onSubmit={submit}>
+          <Link to="/" className="small muted row" style={{ gap: 6 }}><Icon name="arrowLeft" width={14} height={14} /> Back to home</Link>
           <div>
             <h1>{mode === 'login' ? 'Welcome back' : firstRun ? 'Create the admin account' : 'Create your account'}</h1>
             <p className="muted" style={{ marginTop: 6 }}>

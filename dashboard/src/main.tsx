@@ -1,10 +1,11 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
 import { ConfirmProvider, Spinner, ToastProvider } from './components/ui';
 import { Layout } from './components/Layout';
 import { LoginPage } from './pages/Login';
+import { LandingPage } from './pages/Landing';
 import { OverviewPage } from './pages/Overview';
 import { MessagesPage } from './pages/Messages';
 import { SendPage } from './pages/Send';
@@ -19,10 +20,12 @@ import { AdminUsersPage } from './pages/AdminUsers';
 import { ReleasesPage } from './pages/Releases';
 import './styles.css';
 
+// Signed-out visitors see the public landing page at "/"; other pages ask them to sign in.
 function Protected() {
   const { user, loading } = useAuth();
+  const { pathname } = useLocation();
   if (loading) return <Spinner />;
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return pathname === '/' ? <LandingPage /> : <Navigate to="/login" replace />;
   return <Layout />;
 }
 
@@ -35,6 +38,7 @@ function App() {
   const { user, loading } = useAuth();
   return (
     <Routes>
+      <Route path="/welcome" element={<LandingPage />} />
       <Route path="/login" element={loading ? <Spinner /> : user ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route element={<Protected />}>
         <Route index element={<OverviewPage />} />
