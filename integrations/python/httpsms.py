@@ -267,3 +267,4 @@ class HttpSmsClient:
                 raise HttpSmsError(f"Gateway error ({err.code}): {err_content}", err.code, err_content)
         except urllib.error.URLError as err:
             raise HttpSmsError(f"Connection failed to {self.base_url}: {err.reason}")
+

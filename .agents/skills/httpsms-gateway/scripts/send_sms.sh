@@ -98,3 +98,4 @@ curl -s -X POST "$BASE_URL/api/v1/sms/send" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" | python3 -m json.tool || echo ""
+

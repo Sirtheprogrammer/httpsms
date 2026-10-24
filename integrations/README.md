@@ -178,3 +178,4 @@ The gateway includes a native **Antigravity Skill** in `.agents/skills/httpsms-g
 - **Agent Examples**:
   - `otp_verification.py`: Verification code dispatch and confirmation loop.
   - `agent_workflow.py`: OpenAI / Gemini tool declaration schemas.
+

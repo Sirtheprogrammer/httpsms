@@ -142,3 +142,4 @@ echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"httpsms_ge
 - `httpsms_test_webhook`: Fires a live test ping to verify webhook connectivity.
 - `httpsms_get_stats`: Reports gateway throughput and connected node counts.
 - `httpsms_list_workflows`: Lists automated AI response workflows.
+

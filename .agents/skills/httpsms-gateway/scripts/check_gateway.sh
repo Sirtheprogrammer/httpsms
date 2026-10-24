@@ -64,3 +64,4 @@ except Exception as e:
     print(f"  Error parsing message data: {e}")
 ' || echo "Failed to fetch messages."
 echo "================================================"
+
